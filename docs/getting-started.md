@@ -3,7 +3,7 @@ title: Getting Started
 type: guide
 status: draft
 created: 2026-01-13
-updated: 2026-01-13
+updated: 2026-01-14
 owner: Matt Schafer VE7LTX
 purpose: Step-by-step setup for EchoFrame on Windows.
 scope: Installation and first run.
@@ -55,8 +55,9 @@ python -m echoframe.cli gui
 2) Settings > Manage lists: add orgs, projects, channels, tags, and profiles.
 3) Settings > Audio settings: pick the mic device (Zoom H2/H4).
 4) Settings > Transcription settings: set final and live models.
-5) Live meters and waveform start automatically (status bar shows monitoring).
-6) Timestamped notes require a Contact value.
+5) Settings > Mic setup wizard: run the level check and adjust mic gain.
+6) Live meters and waveform start automatically.
+7) Timestamped notes require a Contact value.
 
 ## Capture modes
 - mic: Zoom H2/H4 or any mic
@@ -73,10 +74,12 @@ Notes and media are written under `base_dir`:
 ```
 Recordings/
 Notes/
+Notes/Contacts/<contact_slug>/YYYY-MM-DD.md
 Segments/
 Sessions/
 Logs/
 ```
+WAV recordings are automatically cleaned after 48 hours to limit disk usage.
 
 ## Troubleshooting
 - If devices are not listed, verify Windows sound settings and permissions.

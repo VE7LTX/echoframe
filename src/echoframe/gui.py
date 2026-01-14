@@ -7,6 +7,7 @@ import os
 import queue
 import threading
 import time
+from collections import deque
 from datetime import datetime
 
 from .config import Config, load_config, save_config
@@ -17,8 +18,14 @@ from .recorder import (
     record_audio_stream,
     record_audio_stream_dual,
 )
-from .renderer import render_note
-from .storage import build_session_basename, ensure_dir, ensure_structure, get_output_dirs
+from .renderer import render_contact_note_header, render_recording_section
+from .storage import (
+    build_session_basename,
+    ensure_dir,
+    ensure_structure,
+    get_output_dirs,
+    sanitize_folder,
+)
 from .transcriber import transcribe_audio
 from .logging_utils import setup_logging
 from .audio_utils import extract_channels
@@ -191,6 +198,12 @@ def launch_gui() -> None:
             return fallback
         return value
 
+    waveform_max = 2048
+    waveform_render_max = 1024
+    meter_refresh_ms = 300
+    waveform_refresh_ms = 200
+    meter_log_seconds = 5.0
+
     state = {
         "recording": False,
         "start_time": None,
@@ -198,6 +211,7 @@ def launch_gui() -> None:
         "thread": None,
         "timestamped_notes": [],
         "active_contact": "",
+        "active_contact_id": "",
         "pending_contact": "",
         "suppress_contact_prompt": False,
     }
@@ -212,7 +226,7 @@ def launch_gui() -> None:
         "hud": None,
         "hud_canvas": None,
         "config": None,
-        "waveform": [],
+        "waveform": deque(maxlen=waveform_max),
         "last_update": 0.0,
         "update_count": 0,
         "last_log": 0.0,
@@ -345,6 +359,63 @@ def launch_gui() -> None:
             logger.debug("Debug log read failed: %s", exc)
         return "\n".join(lines)
 
+    def _describe_device(name: str, kind: str) -> str | None:
+        if not name:
+            return None
+        try:
+            import sounddevice as sd
+        except Exception:
+            return name
+        try:
+            devices = sd.query_devices()
+            hostapis = sd.query_hostapis()
+        except Exception:
+            return name
+        exact = next((d for d in devices if d.get("name") == name), None)
+        info = exact
+        if not info:
+            name_lower = name.lower()
+            info = next(
+                (d for d in devices if name_lower in d.get("name", "").lower()), None
+            )
+        if not info:
+            return name
+        hostapi_name = ""
+        host_idx = info.get("hostapi")
+        if host_idx is not None and host_idx < len(hostapis):
+            hostapi_name = hostapis[host_idx].get("name", "")
+        detail = f"{info.get('name', name)}"
+        if info.get("index") is not None:
+            detail += f" (index {info.get('index')})"
+        if hostapi_name:
+            detail += f" [{hostapi_name}]"
+        return detail
+
+    def _cleanup_recordings(recordings_root: str, hours: int = 48) -> None:
+        if not recordings_root or not os.path.exists(recordings_root):
+            return
+        cutoff = time.time() - hours * 3600
+        removed = 0
+        for root_dir, _, files in os.walk(recordings_root):
+            for filename in files:
+                if not filename.lower().endswith(".wav"):
+                    continue
+                path = os.path.join(root_dir, filename)
+                try:
+                    if os.path.getmtime(path) < cutoff:
+                        os.remove(path)
+                        removed += 1
+                except Exception as exc:
+                    logger.debug("Cleanup failed for %s: %s", path, exc)
+        if removed:
+            logger.info("Removed %s recordings older than %s hours", removed, hours)
+
+    def _contact_daily_note_path(note_root: str, contact_name: str, date_str: str) -> str:
+        slug = sanitize_folder(contact_name or "Unknown")
+        contact_dir = os.path.join(note_root, "Contacts", slug)
+        ensure_dir(contact_dir)
+        return os.path.join(contact_dir, f"{date_str}.md")
+
     def _refresh_timestamped_notes() -> None:
         notes_list.delete(0, "end")
         for note in state["timestamped_notes"]:
@@ -476,14 +547,12 @@ def launch_gui() -> None:
             channels = [level]
             peaks = [peak]
             labels = ["level"]
-        level_var.set(f"{level:.2f}")
-        peak_var.set(f"{peak:.2f}")
         _render_meters(channels, peaks, labels)
         if monitor["hud_canvas"] is not None:
             _update_hud(channels, peaks, labels)
         if debug_enabled_var.get():
             now = time.time()
-            if now - last_log >= 2.0:
+            if now - last_log >= meter_log_seconds:
                 logger.debug(
                     "Meter updates=%s last_update=%.2f level=%.2f peak=%.2f channels=%s",
                     update_count,
@@ -494,7 +563,7 @@ def launch_gui() -> None:
                 )
                 with monitor["lock"]:
                     monitor["last_log"] = now
-        root.after(200, _update_meter)
+        root.after(meter_refresh_ms, _update_meter)
 
     monitor_refresh_job = None
 
@@ -552,21 +621,21 @@ def launch_gui() -> None:
             if indata is None:
                 return
             data = indata.astype("float32")
-            data_scaled = data / 32768.0
+            max_abs = float(abs(data).max()) if data.size else 0.0
+            data_scaled = data if max_abs <= 2.0 else data / 32768.0
             rms = float((data**2).mean() ** 0.5)
             channel_rms = (
                 (data**2).mean(axis=0) ** 0.5 if data.ndim == 2 else [rms]
             )
-            if state["recording"]:
-                mono = (
-                    data_scaled.mean(axis=1)
-                    if data_scaled.ndim == 2
-                    else data_scaled
-                )
-                step = max(1, int(len(mono) / 120))
-                samples = mono[::step].tolist()
-                with monitor["lock"]:
-                    monitor["waveform"].extend(samples)
+            mono = (
+                data_scaled.mean(axis=1)
+                if data_scaled.ndim == 2
+                else data_scaled
+            )
+            step = max(1, int(len(mono) / 120))
+            samples = mono[::step].tolist()
+            with monitor["lock"]:
+                monitor["waveform"].extend(samples)
             with monitor["lock"]:
                 needed = start_idx + len(channel_rms)
                 if len(monitor["channels"]) < needed:
@@ -1081,8 +1150,10 @@ def launch_gui() -> None:
     def _update_waveform() -> None:
         with monitor["lock"]:
             samples = list(monitor["waveform"])
+        if len(samples) > waveform_render_max:
+            samples = samples[-waveform_render_max:]
         _render_waveform(samples)
-        root.after(120, _update_waveform)
+        root.after(waveform_refresh_ms, _update_waveform)
 
     def _build_channel_map(mode: str) -> list[str]:
         mic_count = int(mic_channels_var.get())
@@ -1114,6 +1185,7 @@ def launch_gui() -> None:
             return
         logger.info("Start recording requested (%s)", context_type)
         state["active_contact"] = contact_var.get().strip()
+        state["active_contact_id"] = contact_id_var.get().strip()
         state["pending_contact"] = ""
         state["recording"] = True
         state["start_time"] = time.time()
@@ -1121,7 +1193,7 @@ def launch_gui() -> None:
         timer_var.set("00:00")
         state["timestamped_notes"] = []
         with monitor["lock"]:
-            monitor["waveform"] = []
+            monitor["waveform"].clear()
         _refresh_timestamped_notes()
         _set_status(f"Recording ({context_type})...")
         _save_last_used()
@@ -1278,8 +1350,36 @@ def launch_gui() -> None:
                     if project_var.get().strip() and project_var.get().strip() not in tags:
                         tags.append(project_var.get().strip())
 
-                debug_log = _collect_debug_log(recording_start, datetime.now())
-                note_text = render_note(
+                end_ts = datetime.now()
+                debug_log = _collect_debug_log(recording_start, end_ts)
+
+                contact_name = (
+                    state["active_contact"] or contact_var.get().strip() or "Unknown"
+                )
+                contact_id = state["active_contact_id"] or contact_id_var.get().strip() or None
+                organization = org_var.get().strip() or None
+                project = project_var.get().strip() or None
+                location = location_var.get().strip() or None
+                channel = channel_var.get().strip() or None
+
+                notes_root = base_paths["notes"]
+                note_path = _contact_daily_note_path(
+                    notes_root, contact_name, date_str
+                )
+                mic_device_display = (
+                    _describe_device(mic_device_var.get().strip(), "input")
+                    if mode != "system"
+                    else None
+                )
+                system_device_display = (
+                    _describe_device(system_device_var.get().strip(), "output")
+                    if mode != "mic"
+                    else None
+                )
+                system_channels = (
+                    int(system_channels_var.get()) if mode != "mic" else None
+                )
+                section = render_recording_section(
                     title=title,
                     date=date_str,
                     audio_filename=audio_filename,
@@ -1287,7 +1387,9 @@ def launch_gui() -> None:
                     participants=participants or None,
                     tags=tags or None,
                     duration_seconds=record_result.duration_seconds,
-                    device=mic_device_var.get().strip() or None,
+                    capture_mode=mode,
+                    mic_device=mic_device_display,
+                    system_device=system_device_display,
                     sample_rate_hz=int(rate_var.get()),
                     bit_depth=16,
                     channels=int(
@@ -1295,30 +1397,38 @@ def launch_gui() -> None:
                         if mode != "system"
                         else system_channels_var.get()
                     ),
-                    capture_mode=mode,
-                    mic_device=mic_device_var.get().strip() or None,
-                    system_device=system_device_var.get().strip() or None,
-                    system_channels=int(system_channels_var.get()),
+                    system_channels=system_channels,
                     channel_map=_build_channel_map(mode),
                     context_type=context_type,
-                    contact_name=contact_var.get().strip() or None,
-                    contact_id=contact_id_var.get().strip() or None,
-                    organization=org_var.get().strip() or None,
-                    project=project_var.get().strip() or None,
-                    location=location_var.get().strip() or None,
-                    channel=channel_var.get().strip() or None,
                     context_notes=notes_box.get("1.0", "end").strip() or None,
                     timestamped_notes=state["timestamped_notes"],
                     debug_log=debug_log or None,
+                    started_at=recording_start.isoformat(timespec="seconds"),
+                    ended_at=end_ts.isoformat(timespec="seconds"),
                 )
+                if not os.path.exists(note_path):
+                    header = render_contact_note_header(
+                        date_str,
+                        contact_name,
+                        contact_id=contact_id,
+                        organization=organization,
+                        project=project,
+                        location=location,
+                        channel=channel,
+                        tags=tags or None,
+                    )
+                    with open(note_path, "w", encoding="utf-8") as handle:
+                        handle.write(f"{header}{section}")
+                else:
+                    with open(note_path, "a", encoding="utf-8") as handle:
+                        handle.write("\n" + section)
 
-                notes_dir = paths["notes"]
-                note_path = os.path.join(notes_dir, f"{basename}.md")
-                with open(note_path, "w", encoding="utf-8") as handle:
-                    handle.write(note_text)
-
-                segments_path = os.path.join(paths["segments"], f"{basename}.segments.json")
-                session_path = os.path.join(paths["sessions"], f"{basename}.session.json")
+                segments_path = os.path.join(
+                    paths["segments"], f"{basename}.segments.json"
+                )
+                session_path = os.path.join(
+                    paths["sessions"], f"{basename}.session.json"
+                )
                 save_segments(segments_path, segments)
                 session = Session(
                     session_id=basename,
@@ -1331,12 +1441,12 @@ def launch_gui() -> None:
                     ai_summary=None,
                     ai_sentiment=None,
                     context_type=context_type,
-                    contact_name=contact_var.get().strip() or None,
-                    contact_id=contact_id_var.get().strip() or None,
-                    organization=org_var.get().strip() or None,
-                    project=project_var.get().strip() or None,
-                    location=location_var.get().strip() or None,
-                    channel=channel_var.get().strip() or None,
+                    contact_name=contact_name,
+                    contact_id=contact_id,
+                    organization=organization,
+                    project=project,
+                    location=location,
+                    channel=channel,
                     context_notes=notes_box.get("1.0", "end").strip() or None,
                     timestamped_notes=list(state["timestamped_notes"]),
                 )
@@ -1344,6 +1454,7 @@ def launch_gui() -> None:
 
                 _set_status(f"Saved: {note_path}")
                 logger.info("Note saved: %s", note_path)
+                _cleanup_recordings(base_paths["recordings"], hours=48)
             except Exception as exc:
                 logger.exception("Recording workflow failed")
                 _set_status(f"Recording failed: {exc}")
@@ -1354,6 +1465,7 @@ def launch_gui() -> None:
                 _stop_live_transcriber()
                 if state["pending_contact"]:
                     state["active_contact"] = state["pending_contact"]
+                    state["active_contact_id"] = contact_id_var.get().strip()
                     state["pending_contact"] = ""
                 _update_note_controls()
 
@@ -1382,6 +1494,7 @@ def launch_gui() -> None:
         else:
             state["suppress_contact_prompt"] = True
         state["active_contact"] = ""
+        state["active_contact_id"] = ""
         state["pending_contact"] = ""
         contact_var.set("")
         contact_id_var.set("")
@@ -1436,6 +1549,7 @@ def launch_gui() -> None:
         new_contact = contact_var.get().strip()
         if not state["active_contact"]:
             state["active_contact"] = new_contact
+            state["active_contact_id"] = contact_id_var.get().strip()
             _update_note_controls()
             return
         if new_contact == state["active_contact"]:
@@ -1465,6 +1579,7 @@ def launch_gui() -> None:
                 state["timestamped_notes"] = []
                 _refresh_timestamped_notes()
         state["active_contact"] = new_contact
+        state["active_contact_id"] = contact_id_var.get().strip()
         _update_note_controls()
 
     def _save_profile() -> None:
@@ -1777,6 +1892,150 @@ def launch_gui() -> None:
 
         ttk.Button(frame, text="Close", command=_close_audio_settings).grid(
             row=6, column=1, sticky="e", pady=(6, 0)
+        )
+
+    def _open_mic_setup_wizard() -> None:
+        logger.info("Open mic setup wizard")
+        win = tk.Toplevel(root)
+        win.title("Mic setup wizard")
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=8)
+        frame.grid(row=0, column=0, sticky="nsew")
+
+        ttk.Label(
+            frame,
+            text="Say this sentence clearly at your normal volume:",
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        sample_sentence = "The quick brown fox jumps over the lazy dog."
+        ttk.Label(frame, text=sample_sentence, foreground="#6aa6ff").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(2, 8)
+        )
+
+        status_var = tk.StringVar(value="Press Start to begin the level check.")
+        result_var = tk.StringVar(value="")
+        progress_var = tk.IntVar(value=0)
+        running = {"active": False}
+
+        ttk.Button(
+            frame, text="Start test", command=lambda: _start_mic_test()
+        ).grid(row=2, column=0, sticky="w")
+        ttk.Progressbar(
+            frame,
+            maximum=100,
+            variable=progress_var,
+            length=240,
+            style="Neo.Horizontal.TProgressbar",
+        ).grid(row=2, column=1, sticky="w", padx=(8, 0))
+
+        ttk.Label(frame, textvariable=status_var).grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(6, 0)
+        )
+        ttk.Label(frame, textvariable=result_var, foreground="#9ad1ff").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
+
+        def _start_mic_test() -> None:
+            if running["active"]:
+                return
+            running["active"] = True
+            status_var.set("Recording sample...")
+            result_var.set("")
+            progress_var.set(0)
+
+            def _worker() -> None:
+                try:
+                    import sounddevice as sd
+                    import numpy as np
+                except Exception as exc:
+                    root.after(
+                        0, lambda: status_var.set(f"Audio capture unavailable: {exc}")
+                    )
+                    running["active"] = False
+                    return
+
+                try:
+                    sample_rate = int(rate_var.get())
+                except ValueError:
+                    sample_rate = 44100
+                try:
+                    channels = max(1, int(mic_channels_var.get()))
+                except ValueError:
+                    channels = 1
+
+                duration_s = 6
+                target_frames = duration_s * sample_rate
+                frames_seen = 0
+                sum_squares = 0.0
+                total_samples = 0
+                peak = 0.0
+                clipped = 0
+
+                def _callback(indata, frames, _time, status):
+                    nonlocal frames_seen, sum_squares, total_samples, peak, clipped
+                    if status:
+                        pass
+                    data = indata.astype("float32")
+                    frames_seen += frames
+                    peak = max(peak, float(abs(data).max()) if data.size else 0.0)
+                    sum_squares += float((data**2).sum())
+                    total_samples += data.size
+                    clipped += int((abs(data) >= 32760).sum())
+
+                try:
+                    with sd.InputStream(
+                        samplerate=sample_rate,
+                        channels=channels,
+                        dtype="int16",
+                        device=mic_device_var.get().strip() or None,
+                        callback=_callback,
+                    ):
+                        while frames_seen < target_frames:
+                            sd.sleep(100)
+                            ratio = min(frames_seen / target_frames, 1.0)
+                            root.after(
+                                0, lambda r=ratio: progress_var.set(int(r * 100))
+                            )
+                except Exception as exc:
+                    root.after(
+                        0, lambda: status_var.set(f"Capture failed: {exc}")
+                    )
+                    running["active"] = False
+                    return
+
+                if total_samples <= 0:
+                    root.after(0, lambda: status_var.set("No audio captured."))
+                    running["active"] = False
+                    return
+
+                rms = (sum_squares / total_samples) ** 0.5
+                if rms <= 0:
+                    rms_db = -120.0
+                else:
+                    rms_db = 20.0 * np.log10(rms / 32768.0)
+                peak_db = 20.0 * np.log10(max(peak, 1.0) / 32768.0)
+                clip_ratio = clipped / max(1, total_samples)
+
+                if clip_ratio > 0.001 or peak_db > -1.0:
+                    verdict = "Too hot: lower mic gain."
+                elif rms_db < -30.0:
+                    verdict = "Too low: raise mic gain."
+                else:
+                    verdict = "Good level for transcription."
+
+                def _finish() -> None:
+                    status_var.set("Level check complete.")
+                    result_var.set(
+                        f"RMS {rms_db:.1f} dBFS, Peak {peak_db:.1f} dBFS, "
+                        f"Clipped {clip_ratio:.2%}. {verdict}"
+                    )
+                    running["active"] = False
+
+                root.after(0, _finish)
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        ttk.Button(frame, text="Close", command=win.destroy).grid(
+            row=5, column=1, sticky="e", pady=(8, 0)
         )
 
     def _open_transcription_settings() -> None:
@@ -2183,6 +2442,7 @@ def launch_gui() -> None:
         _ToolTip(cancel_btn, "Close without saving.")
 
     settings_menu.add_command(label="Audio settings...", command=_open_audio_settings)
+    settings_menu.add_command(label="Mic setup wizard...", command=_open_mic_setup_wizard)
     settings_menu.add_command(
         label="Transcription settings...", command=_open_transcription_settings
     )
@@ -2202,11 +2462,11 @@ def launch_gui() -> None:
 
     ttk.Label(
         main,
-        text="EchoFrame: metadata on top, settings in menus, then Start.",
+        text="Step 1: setup → Step 2: people/context → Step 3: record.",
     ).grid(row=0, column=0, sticky="w", pady=(0, 2))
     ttk.Label(
         main,
-        text="Capture modes: mic = physical mic, system = app audio via loopback, dual = mic + system.",
+        text="Audio device settings live in the Settings menu (mic/system/dual).",
         foreground="#6aa6ff",
     ).grid(row=1, column=0, sticky="w", pady=(0, 6))
 
@@ -2340,90 +2600,109 @@ def launch_gui() -> None:
     _auto_configure_h2()
     _apply_my_profile(my_profile)
 
-    meta = ttk.LabelFrame(main, text="Obsidian metadata", style="Neo.TLabelframe")
-    meta.grid(row=2, column=0, sticky="ew", pady=(0, 6))
-    meta.columnconfigure(1, weight=1)
-    meta.columnconfigure(3, weight=1)
+    setup_frame = ttk.LabelFrame(main, text="Step 1: Session setup", style="Neo.TLabelframe")
+    setup_frame.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+    setup_frame.columnconfigure(1, weight=1)
+    setup_frame.columnconfigure(3, weight=1)
 
-    ttk.Label(meta, text="Title").grid(row=0, column=0, sticky="w")
-    title_entry = ttk.Entry(meta, textvariable=title_var, width=52)
+    ttk.Label(setup_frame, text="Title").grid(row=0, column=0, sticky="w")
+    title_entry = ttk.Entry(setup_frame, textvariable=title_var, width=52)
     title_entry.grid(row=0, column=1, columnspan=3, sticky="ew")
     _ToolTip(title_entry, "Session title used for file names and notes.")
 
-    ttk.Label(meta, text="Your name").grid(row=1, column=0, sticky="w")
-    user_name_entry = ttk.Entry(meta, textvariable=user_name_var, width=24)
-    user_name_entry.grid(row=1, column=1, sticky="ew")
-    _ToolTip(user_name_entry, "Your name for participants metadata.")
-    ttk.Label(meta, text="Attendees").grid(row=1, column=2, sticky="w")
-    attendees_entry = ttk.Entry(meta, textvariable=attendees_var, width=24)
-    attendees_entry.grid(row=1, column=3, sticky="ew")
-    _ToolTip(attendees_entry, "Comma-separated list of attendees.")
-
-    ttk.Label(meta, text="Contact").grid(row=2, column=0, sticky="w")
-    contact_entry = ttk.Entry(meta, textvariable=contact_var, width=24)
-    contact_entry.grid(row=2, column=1, sticky="ew")
-    _ToolTip(contact_entry, "Primary contact for the session (notes require this).")
-    contact_var.trace_add("write", lambda *_: _handle_contact_change())
-    ttk.Label(meta, text="ID").grid(row=2, column=2, sticky="w")
-    contact_id_entry = ttk.Entry(meta, textvariable=contact_id_var, width=24)
-    contact_id_entry.grid(row=2, column=3, sticky="ew")
-    _ToolTip(contact_id_entry, "Internal contact/client ID.")
-
-    ttk.Label(meta, text="Org").grid(row=3, column=0, sticky="w")
-    org_combo = ttk.Combobox(
-        meta, textvariable=org_var, values=presets["organizations"], width=22
-    )
-    org_combo.grid(row=3, column=1, sticky="ew")
-    _ToolTip(org_combo, "Organization or client company.")
-    ttk.Label(meta, text="Project").grid(row=3, column=2, sticky="w")
-    project_combo = ttk.Combobox(
-        meta, textvariable=project_var, values=presets["projects"], width=22
-    )
-    project_combo.grid(row=3, column=3, sticky="ew")
-    _ToolTip(project_combo, "Project or initiative label.")
-
-    ttk.Label(meta, text="Location").grid(row=4, column=0, sticky="w")
-    location_entry = ttk.Entry(meta, textvariable=location_var, width=24)
-    location_entry.grid(row=4, column=1, sticky="ew")
-    _ToolTip(location_entry, "Physical location or meeting room.")
-    ttk.Label(meta, text="Channel").grid(row=4, column=2, sticky="w")
-    channel_combo = ttk.Combobox(
-        meta, textvariable=channel_var, values=presets["channels"], width=22
-    )
-    channel_combo.grid(row=4, column=3, sticky="ew")
-    _ToolTip(channel_combo, "Session channel (in_person/phone/webchat).")
-
-    ttk.Label(meta, text="Tags").grid(row=5, column=0, sticky="w")
-    tags_entry = ttk.Entry(meta, textvariable=tags_var, width=24)
-    tags_entry.grid(row=5, column=1, sticky="ew")
-    _ToolTip(tags_entry, "Comma-separated tags for Obsidian.")
-    ttk.Label(meta, text="Type").grid(row=5, column=2, sticky="w")
+    ttk.Label(setup_frame, text="Type").grid(row=1, column=0, sticky="w")
     context_combo = ttk.Combobox(
-        meta,
+        setup_frame,
         textvariable=context_type_var,
         values=presets["context_types"],
         width=22,
     )
-    context_combo.grid(row=5, column=3, sticky="ew")
+    context_combo.grid(row=1, column=1, sticky="ew")
     _ToolTip(context_combo, "Context type used in frontmatter.")
 
-    auto_tags_cb = ttk.Checkbutton(meta, text="Auto tags", variable=auto_tags_var)
-    auto_tags_cb.grid(row=6, column=0, sticky="w")
-    _ToolTip(auto_tags_cb, "Auto-add context type and project to tags.")
-    ttk.Label(meta, text="Profile").grid(row=6, column=2, sticky="w")
+    ttk.Label(setup_frame, text="Profile").grid(row=1, column=2, sticky="w")
     profile_combo = ttk.Combobox(
-        meta,
+        setup_frame,
         textvariable=profile_var,
         values=[p.get("name") for p in presets["profiles"]],
         width=22,
     )
-    profile_combo.grid(row=6, column=3, sticky="ew")
+    profile_combo.grid(row=1, column=3, sticky="ew")
     profile_combo.bind("<<ComboboxSelected>>", _apply_profile)
     _ToolTip(profile_combo, "Apply a saved profile to auto-fill fields.")
 
-    ttk.Label(meta, text="Notes").grid(row=7, column=0, sticky="nw")
+    ttk.Label(setup_frame, text="Tags").grid(row=2, column=0, sticky="w")
+    tags_entry = ttk.Entry(setup_frame, textvariable=tags_var, width=24)
+    tags_entry.grid(row=2, column=1, sticky="ew")
+    _ToolTip(tags_entry, "Comma-separated tags for Obsidian.")
+    auto_tags_cb = ttk.Checkbutton(
+        setup_frame, text="Auto tags", variable=auto_tags_var
+    )
+    auto_tags_cb.grid(row=2, column=2, columnspan=2, sticky="w")
+    _ToolTip(auto_tags_cb, "Auto-add context type and project to tags.")
+
+    btn_row = ttk.Frame(setup_frame)
+    btn_row.grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
+    for idx, label in enumerate(presets["context_types"]):
+        btn = ttk.Button(
+            btn_row, text=label, command=lambda l=label: _apply_context_type(l)
+        )
+        btn.grid(row=0, column=idx, padx=2)
+        _ToolTip(btn, f"Apply {label} metadata without starting recording.")
+
+    context_frame = ttk.LabelFrame(
+        main, text="Step 2: People & context", style="Neo.TLabelframe"
+    )
+    context_frame.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+    context_frame.columnconfigure(1, weight=1)
+    context_frame.columnconfigure(3, weight=1)
+
+    ttk.Label(context_frame, text="Your name").grid(row=0, column=0, sticky="w")
+    user_name_entry = ttk.Entry(context_frame, textvariable=user_name_var, width=24)
+    user_name_entry.grid(row=0, column=1, sticky="ew")
+    _ToolTip(user_name_entry, "Your name for participants metadata.")
+    ttk.Label(context_frame, text="Attendees").grid(row=0, column=2, sticky="w")
+    attendees_entry = ttk.Entry(context_frame, textvariable=attendees_var, width=24)
+    attendees_entry.grid(row=0, column=3, sticky="ew")
+    _ToolTip(attendees_entry, "Comma-separated list of attendees.")
+
+    ttk.Label(context_frame, text="Contact").grid(row=1, column=0, sticky="w")
+    contact_entry = ttk.Entry(context_frame, textvariable=contact_var, width=24)
+    contact_entry.grid(row=1, column=1, sticky="ew")
+    _ToolTip(contact_entry, "Primary contact for the session (notes require this).")
+    contact_var.trace_add("write", lambda *_: _handle_contact_change())
+    ttk.Label(context_frame, text="ID").grid(row=1, column=2, sticky="w")
+    contact_id_entry = ttk.Entry(context_frame, textvariable=contact_id_var, width=24)
+    contact_id_entry.grid(row=1, column=3, sticky="ew")
+    _ToolTip(contact_id_entry, "Internal contact/client ID.")
+
+    ttk.Label(context_frame, text="Org").grid(row=2, column=0, sticky="w")
+    org_combo = ttk.Combobox(
+        context_frame, textvariable=org_var, values=presets["organizations"], width=22
+    )
+    org_combo.grid(row=2, column=1, sticky="ew")
+    _ToolTip(org_combo, "Organization or client company.")
+    ttk.Label(context_frame, text="Project").grid(row=2, column=2, sticky="w")
+    project_combo = ttk.Combobox(
+        context_frame, textvariable=project_var, values=presets["projects"], width=22
+    )
+    project_combo.grid(row=2, column=3, sticky="ew")
+    _ToolTip(project_combo, "Project or initiative label.")
+
+    ttk.Label(context_frame, text="Location").grid(row=3, column=0, sticky="w")
+    location_entry = ttk.Entry(context_frame, textvariable=location_var, width=24)
+    location_entry.grid(row=3, column=1, sticky="ew")
+    _ToolTip(location_entry, "Physical location or meeting room.")
+    ttk.Label(context_frame, text="Channel").grid(row=3, column=2, sticky="w")
+    channel_combo = ttk.Combobox(
+        context_frame, textvariable=channel_var, values=presets["channels"], width=22
+    )
+    channel_combo.grid(row=3, column=3, sticky="ew")
+    _ToolTip(channel_combo, "Session channel (in_person/phone/webchat).")
+
+    ttk.Label(context_frame, text="Notes").grid(row=4, column=0, sticky="nw")
     notes_box = tk.Text(
-        meta,
+        context_frame,
         width=52,
         height=3,
         bg="#0b0f14",
@@ -2433,12 +2712,14 @@ def launch_gui() -> None:
         bd=0,
         relief="flat",
     )
-    notes_box.grid(row=7, column=1, columnspan=3, sticky="ew")
+    notes_box.grid(row=4, column=1, columnspan=3, sticky="ew")
     notes_box.insert("1.0", _last_used_value("notes", ""))
     _ToolTip(notes_box, "Freeform notes to capture context during recording.")
 
-    notes_frame = ttk.LabelFrame(meta, text="Timestamped notes", style="Neo.TLabelframe")
-    notes_frame.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+    notes_frame = ttk.LabelFrame(
+        context_frame, text="Timestamped notes", style="Neo.TLabelframe"
+    )
+    notes_frame.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
     notes_frame.columnconfigure(0, weight=1)
     notes_entry_var = tk.StringVar()
     notes_entry = ttk.Entry(notes_frame, textvariable=notes_entry_var, width=52)
@@ -2455,15 +2736,6 @@ def launch_gui() -> None:
     )
     _ToolTip(add_note_btn, "Capture a timestamped note.")
     _ToolTip(notes_list, "Notes captured during recording (stored in the note).")
-
-    btn_row = ttk.Frame(main)
-    btn_row.grid(row=3, column=0, sticky="w", pady=(6, 0))
-    for idx, label in enumerate(presets["context_types"]):
-        btn = ttk.Button(
-            btn_row, text=label, command=lambda l=label: _apply_context_type(l)
-        )
-        btn.grid(row=0, column=idx, padx=2)
-        _ToolTip(btn, f"Apply {label} metadata without starting recording.")
 
     control_row = ttk.Frame(main)
     control_row.grid(row=4, column=0, sticky="w", pady=(6, 0))
@@ -2581,23 +2853,17 @@ def launch_gui() -> None:
     status_row.grid(row=9, column=0, sticky="ew", pady=(6, 0))
     timer_var = tk.StringVar(value="00:00")
     ttk.Label(status_row, textvariable=timer_var).grid(row=0, column=0, sticky="w")
-    level_var = tk.StringVar(value="0.00")
-    peak_var = tk.StringVar(value="0.00")
-    ttk.Label(status_row, text="Level").grid(row=0, column=1, sticky="w", padx=(12, 0))
-    ttk.Label(status_row, textvariable=level_var).grid(row=0, column=2, sticky="w")
-    ttk.Label(status_row, text="Peak").grid(row=0, column=3, sticky="w", padx=(12, 0))
-    ttk.Label(status_row, textvariable=peak_var).grid(row=0, column=4, sticky="w")
     status_var = tk.StringVar(value="Idle")
-    ttk.Label(status_row, textvariable=status_var).grid(row=0, column=5, sticky="w", padx=(12, 0))
+    ttk.Label(status_row, textvariable=status_var).grid(row=0, column=1, sticky="w", padx=(12, 0))
 
     debug_enabled_var = tk.BooleanVar(value=debug_enabled)
     debug_badge = ttk.Label(status_row, text="DEBUG", foreground="red")
     if debug_enabled_var.get():
-        debug_badge.grid(row=0, column=6, sticky="e", padx=(12, 0))
+        debug_badge.grid(row=0, column=2, sticky="e", padx=(12, 0))
 
     def _update_debug_badge() -> None:
         if debug_enabled_var.get():
-            debug_badge.grid(row=0, column=6, sticky="e", padx=(12, 0))
+            debug_badge.grid(row=0, column=2, sticky="e", padx=(12, 0))
         else:
             debug_badge.grid_forget()
 
