@@ -24,7 +24,7 @@ schema: 1
 
 ## Install dependencies
 ```powershell
-pip install sounddevice numpy faster-whisper pyannote.audio
+pip install sounddevice numpy faster-whisper pyannote.audio ttkbootstrap
 ```
 
 ## Create a basic config
@@ -55,6 +55,7 @@ python -m echoframe.cli gui
 2) Settings > Manage lists: add orgs, projects, channels, tags, and profiles.
 3) Settings > Audio settings: pick the mic device (Zoom H2/H4).
 4) Settings > Transcription settings: set final and live models.
+5) Live meters and waveform start automatically (status bar shows monitoring).
 
 ## Capture modes
 - mic: Zoom H2/H4 or any mic
@@ -80,3 +81,4 @@ Logs/
 - If devices are not listed, verify Windows sound settings and permissions.
 - If diarization fails, confirm your HuggingFace token.
 - If system audio is silent, ensure the app output device matches the GUI System device.
+- Use `python scripts/diagnose_audio.py` to confirm device meters and `python scripts/diagnose_loopback.py` for system audio.

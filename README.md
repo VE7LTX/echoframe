@@ -11,19 +11,21 @@ Prototype working: GUI bar, local recording, Faster-Whisper transcription, optio
 - Local capture from Zoom H2/H4, headset/webcam mics, or Windows system audio (loopback)
 - Dual-track mode: mic + system in one multichannel WAV
 - Faster-Whisper transcription with timestamps
-- Live transcript preview in the GUI while recording
+- Live waveform preview with transcription/diarization progress overlay
+- System feed panel for process updates
 - Live vs final model split with progress indicator
 - Optional speaker diarization with pyannote
 - Obsidian YAML frontmatter + Markdown transcript
 - Context metadata (participants, project, channel, notes)
 - Compact Tkinter GUI with presets, profiles, and audio HUD
+- Always-on live meters with per-channel peaks
 - Auto-detect Zoom H2/H4 and default to 4-channel mic capture when supported
 - My Profile defaults and CRUD list management for dropdowns
 
 ## Quickstart (Windows)
 Install Python dependencies:
 ```powershell
-pip install sounddevice numpy faster-whisper pyannote.audio
+pip install sounddevice numpy faster-whisper pyannote.audio ttkbootstrap
 ```
 
 Run the GUI:
@@ -82,6 +84,13 @@ echoframe record --mode dual --mic-device "Zoom H2" --system-device "Speakers"
 echoframe h2 --duration 60 --transcribe
 echoframe transcribe path/to/audio.wav --model small --out segments.json
 echoframe show path/to/session.session.json
+```
+
+## Diagnostics
+```
+python scripts/diagnose_audio.py --device "Zoom" --channels 2 --seconds 6
+python scripts/diagnose_loopback.py --device "Speakers" --channels 2 --seconds 6
+python scripts/diagnose_transcribe.py path/to/audio.wav --model tiny
 ```
 
 ## Obsidian links

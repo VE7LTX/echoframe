@@ -268,6 +268,8 @@ def main() -> int:
             location=None,
             channel=None,
             context_notes=None,
+            timestamped_notes=None,
+            debug_log=None,
         )
         note_path = os.path.join(paths["notes"], f"{basename}.md")
         with open(note_path, "w", encoding="utf-8") as handle:

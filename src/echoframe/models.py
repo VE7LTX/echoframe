@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List
 
 
@@ -33,3 +33,4 @@ class Session:
     location: Optional[str] = None
     channel: Optional[str] = None
     context_notes: Optional[str] = None
+    timestamped_notes: list[dict] = field(default_factory=list)

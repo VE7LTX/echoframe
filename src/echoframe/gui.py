@@ -7,6 +7,7 @@ import os
 import queue
 import threading
 import time
+from collections import deque
 from datetime import datetime
 
 from .config import Config, load_config, save_config
@@ -133,6 +134,14 @@ def launch_gui() -> None:
         level=logging.DEBUG if debug_enabled else logging.INFO,
     )
 
+    def _thread_excepthook(args) -> None:
+        logger.exception(
+            "Thread exception",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    threading.excepthook = _thread_excepthook
+
     presets = {
         "context_types": config.context.get(
             "context_types",
@@ -188,6 +197,7 @@ def launch_gui() -> None:
         "start_time": None,
         "stop_event": threading.Event(),
         "thread": None,
+        "timestamped_notes": [],
     }
     monitor = {
         "streams": [],
@@ -199,15 +209,24 @@ def launch_gui() -> None:
         "labels": [],
         "hud": None,
         "hud_canvas": None,
+        "config": None,
+        "waveform": deque(maxlen=2048),
     }
     live = {
         "audio_queue": None,
-        "text_queue": queue.Queue(),
+        "text_queue": None,
         "stop_event": threading.Event(),
         "thread": None,
     }
+    feed = {
+        "queue": queue.Queue(),
+        "max_lines": 200,
+    }
+    live["text_queue"] = feed["queue"]
     transcribe = {
         "progress_queue": queue.Queue(),
+        "stage": "idle",
+        "ratio": 0.0,
     }
 
     class _ToolTip:
@@ -215,11 +234,19 @@ def launch_gui() -> None:
             self.widget = widget
             self.text = text
             self.tip = None
+            self._bootstrap_tip = None
+            try:
+                from ttkbootstrap.tooltip import ToolTip as BsToolTip
+
+                self._bootstrap_tip = BsToolTip(widget, text=text)
+                return
+            except Exception:
+                pass
             widget.bind("<Enter>", self._show)
             widget.bind("<Leave>", self._hide)
 
         def _show(self, _event=None) -> None:
-            if self.tip or not self.text:
+            if self.tip or not self.text or self._bootstrap_tip is not None:
                 return
             x = self.widget.winfo_rootx() + 20
             y = self.widget.winfo_rooty() + 20
@@ -229,13 +256,14 @@ def launch_gui() -> None:
             label = tk.Label(
                 self.tip,
                 text=self.text,
-                background="#ffffe0",
+                background="#0f1a2a",
+                foreground="#d8e1ff",
                 relief="solid",
                 borderwidth=1,
                 font=("Segoe UI", 9),
                 justify="left",
             )
-            label.pack(ipadx=4, ipady=2)
+            label.pack(ipadx=6, ipady=4)
 
         def _hide(self, _event=None) -> None:
             if self.tip:
@@ -243,7 +271,12 @@ def launch_gui() -> None:
                 self.tip = None
 
     def _set_status(text: str) -> None:
-        status_var.set(text)
+        if threading.current_thread() is threading.main_thread():
+            status_var.set(text)
+        else:
+            root.after(0, lambda: status_var.set(text))
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        feed["queue"].put(f"[{timestamp}] {text}")
         logger.info(text)
 
     def _log_fields(context: str) -> None:
@@ -280,6 +313,39 @@ def launch_gui() -> None:
     def _log_field_change(field_name: str) -> None:
         logger.debug("Field updated: %s", field_name)
         _log_fields(f"field:{field_name}")
+
+    def _format_timestamp(seconds: float | int) -> str:
+        total = int(max(0, seconds))
+        mins, secs = divmod(total, 60)
+        return f"{mins:02d}:{secs:02d}"
+
+    def _collect_debug_log(start_ts: datetime, end_ts: datetime) -> str:
+        if not debug_enabled_var.get():
+            return ""
+        if not os.path.exists(log_path):
+            return ""
+        lines = []
+        try:
+            with open(log_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if len(line) < 20:
+                        continue
+                    try:
+                        stamp = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        continue
+                    if start_ts <= stamp <= end_ts:
+                        lines.append(line.rstrip())
+        except Exception as exc:
+            logger.debug("Debug log read failed: %s", exc)
+        return "\n".join(lines)
+
+    def _refresh_timestamped_notes() -> None:
+        notes_list.delete(0, "end")
+        for note in state["timestamped_notes"]:
+            stamp = note.get("timestamp", "00:00")
+            text = note.get("text", "")
+            notes_list.insert("end", f"[{stamp}] {text}")
 
     def _remember_preset(key: str, value: str) -> None:
         value = value.strip()
@@ -401,18 +467,50 @@ def launch_gui() -> None:
             _update_hud(channels, peaks, labels)
         root.after(200, _update_meter)
 
-    def _toggle_monitor() -> None:
-        logger.info("Monitor toggle")
-        if monitor["streams"]:
-            for stream in monitor["streams"]:
-                try:
-                    stream.stop()
-                    stream.close()
-                except Exception:
-                    pass
-            monitor["streams"] = []
-            _set_status("Monitor stopped")
+    monitor_refresh_job = None
+
+    def _monitor_config() -> tuple:
+        try:
+            rate = int(rate_var.get())
+        except ValueError:
+            rate = 44100
+        try:
+            mic_channels = int(mic_channels_var.get())
+        except ValueError:
+            mic_channels = 1
+        try:
+            system_channels = int(system_channels_var.get())
+        except ValueError:
+            system_channels = 2
+        return (
+            capture_mode_var.get().strip(),
+            mic_device_var.get().strip(),
+            system_device_var.get().strip(),
+            rate,
+            mic_channels,
+            system_channels,
+        )
+
+    def _stop_monitoring() -> None:
+        if not monitor["streams"]:
             return
+        for stream in monitor["streams"]:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
+        monitor["streams"] = []
+        monitor["config"] = None
+        _set_status("Monitoring stopped")
+
+    def _start_monitoring(force: bool = False, reason: str | None = None) -> None:
+        cfg = _monitor_config()
+        if monitor["streams"] and monitor["config"] == cfg and not force:
+            return
+        if monitor["streams"]:
+            _stop_monitoring()
+        logger.info("Monitor start%s", f" ({reason})" if reason else "")
 
         try:
             import sounddevice as sd
@@ -425,10 +523,21 @@ def launch_gui() -> None:
             if indata is None:
                 return
             data = indata.astype("float32")
+            data_scaled = data / 32768.0
             rms = float((data**2).mean() ** 0.5)
             channel_rms = (
                 (data**2).mean(axis=0) ** 0.5 if data.ndim == 2 else [rms]
             )
+            if monitor["waveform"] is not None:
+                mono = (
+                    data_scaled.mean(axis=1)
+                    if data_scaled.ndim == 2
+                    else data_scaled
+                )
+                step = max(1, int(len(mono) / 120))
+                samples = mono[::step].tolist()
+                with monitor["lock"]:
+                    monitor["waveform"].extend(samples)
             with monitor["lock"]:
                 needed = start_idx + len(channel_rms)
                 if len(monitor["channels"]) < needed:
@@ -442,7 +551,7 @@ def launch_gui() -> None:
                 monitor["level"] = max(monitor["channels"], default=0.0)
                 monitor["peak"] = max(monitor["peaks"], default=0.0)
 
-        mode = capture_mode_var.get()
+        mode = capture_mode_var.get().strip()
         try:
             _log_fields("monitor_start")
             monitor["labels"] = _build_channel_map(mode)
@@ -579,10 +688,23 @@ def launch_gui() -> None:
                 )
                 stream.start()
                 monitor["streams"] = [stream]
-            _set_status("Monitoring levels...")
+            monitor["config"] = cfg
+            _set_status(f"Monitoring levels ({mode})...")
         except Exception as exc:
             logger.exception("Monitor failed")
             _set_status(f"Monitor failed: {exc}")
+            monitor["config"] = None
+
+    def _ensure_monitoring(reason: str = "auto") -> None:
+        if monitor["streams"] and monitor["config"] == _monitor_config():
+            return
+        _start_monitoring(force=True, reason=reason)
+
+    def _schedule_monitor_refresh(reason: str = "config_change") -> None:
+        nonlocal monitor_refresh_job
+        if monitor_refresh_job is not None:
+            root.after_cancel(monitor_refresh_job)
+        monitor_refresh_job = root.after(300, lambda: _ensure_monitoring(reason))
 
     def _open_hud() -> None:
         logger.info("Open HUD")
@@ -611,27 +733,23 @@ def launch_gui() -> None:
             monitor["peaks"] = [0.0 for _ in monitor["peaks"]]
         _set_status("Peaks reset")
 
-    def _append_transcript(text: str) -> None:
-        transcript_box.configure(state="normal")
-        transcript_box.insert("end", text, "live")
-        transcript_box.see("end")
-        transcript_box.configure(state="disabled")
+    def _append_feed(text: str) -> None:
+        feed_box.configure(state="normal")
+        feed_box.insert("end", text + "\n")
+        feed_box.see("end")
+        lines = int(feed_box.index("end-1c").split(".")[0])
+        if lines > feed["max_lines"]:
+            feed_box.delete("1.0", f"{lines - feed['max_lines']}.0")
+        feed_box.configure(state="disabled")
 
-    def _poll_transcript() -> None:
+    def _poll_feed() -> None:
         while True:
             try:
-                item = live["text_queue"].get_nowait()
+                item = feed["queue"].get_nowait()
             except queue.Empty:
                 break
-            if isinstance(item, tuple) and item[0] == "replace":
-                _, text, tag = item
-                transcript_box.configure(state="normal")
-                transcript_box.delete("1.0", "end")
-                transcript_box.insert("end", text, tag)
-                transcript_box.configure(state="disabled")
-            else:
-                _append_transcript(str(item))
-        root.after(200, _poll_transcript)
+            _append_feed(str(item))
+        root.after(200, _poll_feed)
 
     def _poll_transcribe_progress() -> None:
         while True:
@@ -642,15 +760,23 @@ def launch_gui() -> None:
             if item == "start":
                 progress_var.set(0)
                 progress_label_var.set("Final transcription 0%")
+                transcribe["stage"] = "transcribing"
+                transcribe["ratio"] = 0.0
             elif item == "done":
                 progress_var.set(100)
                 progress_label_var.set("Final transcription complete")
+                transcribe["stage"] = "transcribed"
+                transcribe["ratio"] = 1.0
             elif item == "diarize_start":
                 progress_var.set(0)
                 progress_label_var.set("Diarization 0%")
+                transcribe["stage"] = "diarizing"
+                transcribe["ratio"] = 0.0
             elif item == "diarize_done":
                 progress_var.set(100)
                 progress_label_var.set("Diarization complete")
+                transcribe["stage"] = "diarized"
+                transcribe["ratio"] = 1.0
             elif isinstance(item, float):
                 pct = int(item * 100)
                 progress_var.set(pct)
@@ -659,6 +785,7 @@ def launch_gui() -> None:
                     else "Diarization"
                 )
                 progress_label_var.set(f"{label} {pct}%")
+                transcribe["ratio"] = min(max(item, 0.0), 1.0)
         root.after(200, _poll_transcribe_progress)
 
     def _stop_live_transcriber() -> None:
@@ -803,7 +930,7 @@ def launch_gui() -> None:
                 10,
                 10,
                 anchor="nw",
-                text="No active levels. Use Monitor or Start to see meters.",
+                text="No active levels yet. Waiting for input device.",
                 fill="#6aa6ff",
             )
             return
@@ -846,6 +973,86 @@ def launch_gui() -> None:
                 fill="#8bd3ff",
             )
 
+    def _render_waveform(samples: list[float]) -> None:
+        if waveform_canvas is None:
+            return
+        canvas = waveform_canvas
+        canvas.delete("all")
+        if not samples:
+            canvas.create_text(
+                10,
+                10,
+                anchor="nw",
+                text="Waiting for input...",
+                fill="#6aa6ff",
+            )
+            return
+        width = int(canvas.winfo_width() or 520)
+        height = int(canvas.winfo_height() or 120)
+        mid_y = int(height / 2)
+        max_amp = max(max(samples, default=0.0), abs(min(samples, default=0.0)))
+        max_amp = max(max_amp, 0.05)
+        scale = (height / 2 - 8) / max_amp
+        count = len(samples)
+        points = []
+        for idx, sample in enumerate(samples):
+            x = int(idx * (width - 2) / max(1, count - 1)) + 1
+            y = int(mid_y - sample * scale)
+            points.append((x, y))
+
+        stage = transcribe["stage"]
+        ratio = float(transcribe["ratio"] or 0.0)
+        if state["recording"]:
+            stage = "recording"
+            ratio = 0.0
+        color_map = {
+            "recording": "#2de2e6",
+            "transcribing": "#ff4d6d",
+            "transcribed": "#ff9f43",
+            "diarizing": "#ff9f43",
+            "diarized": "#32ff7e",
+            "idle": "#6aa6ff",
+        }
+        base_color = "#233044"
+        progress_color = color_map.get(stage, "#6aa6ff")
+
+        def _flatten(items: list[tuple[int, int]]) -> list[int]:
+            flat = []
+            for x, y in items:
+                flat.extend([x, y])
+            return flat
+
+        split_idx = int(ratio * (count - 1)) if count > 1 else 0
+        if split_idx > 1:
+            canvas.create_line(
+                _flatten(points[: split_idx + 1]),
+                fill=progress_color,
+                width=2,
+            )
+        if split_idx < count - 1:
+            canvas.create_line(
+                _flatten(points[split_idx:]),
+                fill=base_color,
+                width=2,
+            )
+
+        if stage in ("transcribing", "diarizing"):
+            progress_x = int(ratio * (width - 2)) + 1
+            canvas.create_line(
+                progress_x,
+                6,
+                progress_x,
+                height - 6,
+                fill=progress_color,
+                width=2,
+            )
+
+    def _update_waveform() -> None:
+        with monitor["lock"]:
+            samples = list(monitor["waveform"])
+        _render_waveform(samples)
+        root.after(120, _update_waveform)
+
     def _build_channel_map(mode: str) -> list[str]:
         mic_count = int(mic_channels_var.get())
         sys_count = int(system_channels_var.get())
@@ -879,18 +1086,11 @@ def launch_gui() -> None:
         state["start_time"] = time.time()
         state["stop_event"].clear()
         timer_var.set("00:00")
+        state["timestamped_notes"] = []
+        _refresh_timestamped_notes()
         _set_status(f"Recording ({context_type})...")
         _save_last_used()
-        if not monitor["streams"]:
-            _toggle_monitor()
-        transcript_box.configure(state="normal")
-        transcript_box.delete("1.0", "end")
-        transcript_box.configure(state="disabled")
-        while True:
-            try:
-                live["text_queue"].get_nowait()
-            except queue.Empty:
-                break
+        _ensure_monitoring("recording_start")
         _log_fields("recording_start")
 
         title = title_var.get().strip() or context_type
@@ -904,215 +1104,220 @@ def launch_gui() -> None:
         output_path = os.path.join(out_dir, f"{basename}.wav")
         logger.info("Start recording: %s", output_path)
 
+        recording_start = datetime.now()
+
         def _worker() -> None:
-            mode = capture_mode_var.get()
             try:
-                mic_count = int(mic_channels_var.get())
-            except ValueError:
-                mic_count = 1
-            try:
-                system_count = int(system_channels_var.get())
-            except ValueError:
-                system_count = 1
-            _start_live_transcriber(
-                sample_rate_hz=int(rate_var.get()),
-                channels=mic_count if mode != "system" else system_count,
-            )
-
-            def _enqueue_audio(chunk) -> None:
-                if live["audio_queue"] is None:
-                    return
+                mode = capture_mode_var.get()
                 try:
-                    live["audio_queue"].put_nowait(chunk)
-                except queue.Full:
-                    pass
+                    mic_count = int(mic_channels_var.get())
+                except ValueError:
+                    mic_count = 1
+                try:
+                    system_count = int(system_channels_var.get())
+                except ValueError:
+                    system_count = 1
+                def _enqueue_audio(chunk) -> None:
+                    if live["audio_queue"] is None:
+                        return
+                    try:
+                        live["audio_queue"].put_nowait(chunk)
+                    except queue.Full:
+                        pass
 
-            if mode == "dual":
-                record_result = record_audio_stream_dual(
-                    output_path=output_path,
-                    sample_rate_hz=int(rate_var.get()),
-                    mic_channels=int(mic_channels_var.get()),
-                    system_channels=int(system_channels_var.get()),
-                    mic_device_name=mic_device_var.get().strip() or None,
-                    system_device_name=system_device_var.get().strip() or None,
-                    stop_event=state["stop_event"],
-                    on_chunk=_enqueue_audio,
-                )
-            else:
-                record_result = record_audio_stream(
-                    output_path=output_path,
-                    sample_rate_hz=int(rate_var.get()),
-                    channels=int(
-                        system_channels_var.get())
+                if mode == "dual":
+                    record_result = record_audio_stream_dual(
+                        output_path=output_path,
+                        sample_rate_hz=int(rate_var.get()),
+                        mic_channels=int(mic_channels_var.get()),
+                        system_channels=int(system_channels_var.get()),
+                        mic_device_name=mic_device_var.get().strip() or None,
+                        system_device_name=system_device_var.get().strip() or None,
+                        stop_event=state["stop_event"],
+                        on_chunk=_enqueue_audio,
+                    )
+                else:
+                    record_result = record_audio_stream(
+                        output_path=output_path,
+                        sample_rate_hz=int(rate_var.get()),
+                        channels=int(system_channels_var.get())
                         if mode == "system"
                         else int(mic_channels_var.get()),
-                    device_name=system_device_var.get().strip() or None
-                    if mode == "system"
-                    else mic_device_var.get().strip() or None,
-                    stop_event=state["stop_event"],
-                    loopback=mode == "system",
-                    on_chunk=_enqueue_audio,
-                )
+                        device_name=system_device_var.get().strip() or None
+                        if mode == "system"
+                        else mic_device_var.get().strip() or None,
+                        stop_event=state["stop_event"],
+                        loopback=mode == "system",
+                        on_chunk=_enqueue_audio,
+                    )
 
-            state["recording"] = False
-            state["start_time"] = None
-            _stop_live_transcriber()
-            _set_status("Transcribing...")
-            transcribe["progress_queue"].put("start")
+                state["recording"] = False
+                state["start_time"] = None
+                _stop_live_transcriber()
+                _set_status("Transcribing...")
+                transcribe["progress_queue"].put("start")
 
-            transcribe_path = output_path
-            if mode == "dual":
-                mic_count = int(mic_channels_var.get())
-                segments_dir = paths["segments"]
-                ensure_dir(segments_dir)
-                mic_only_path = os.path.join(
-                    segments_dir, f"{basename}.mic.wav"
-                )
-                extract_channels(
-                    output_path, mic_only_path, list(range(0, mic_count))
-                )
-                transcribe_path = mic_only_path
-            elif mode == "mic":
-                mic_count = int(mic_channels_var.get())
-                if mic_count > 2:
+                transcribe_path = output_path
+                if mode == "dual":
+                    mic_count = int(mic_channels_var.get())
                     segments_dir = paths["segments"]
                     ensure_dir(segments_dir)
-                    front_path = os.path.join(
-                        segments_dir, f"{basename}.front.wav"
+                    mic_only_path = os.path.join(
+                        segments_dir, f"{basename}.mic.wav"
                     )
-                    extract_channels(output_path, front_path, [0, 1])
-                    transcribe_path = front_path
-
-            total_duration_s = (
-                record_result.duration_seconds
-                if record_result and record_result.duration_seconds
-                else None
-            )
-
-            def _progress_cb(ratio: float) -> None:
-                transcribe["progress_queue"].put(ratio)
-
-            segments = transcribe_audio(
-                transcribe_path,
-                model_name=model_var.get().strip() or "small",
-                language=language_var.get().strip() or None,
-                device=device_pref_var.get().strip() or None,
-                compute_type=compute_type_var.get().strip() or None,
-                progress_cb=_progress_cb,
-                total_duration_s=total_duration_s,
-            )
-            transcribe["progress_queue"].put("done")
-            final_text = _format_segments(segments)
-            if final_text:
-                live["text_queue"].put("\n[Final transcription ready]\n")
-                live["text_queue"].put(("replace", final_text, "final"))
-
-            if diarize_var.get():
-                _set_status("Diarizing...")
-                transcribe["progress_queue"].put("diarize_start")
-                try:
-                    speaker_map = {}
-                    for pair in speaker_map_var.get().split(","):
-                        if ":" in pair:
-                            k, v = pair.split(":", 1)
-                            speaker_map[k.strip()] = v.strip()
-                    segments = diarize_segments(
-                        transcribe_path,
-                        segments,
-                        speaker_map=speaker_map or None,
-                        hf_token=hf_token_var.get().strip() or None,
+                    extract_channels(
+                        output_path, mic_only_path, list(range(0, mic_count))
                     )
-                    diarized_text = _format_segments(segments)
-                    if diarized_text:
-                        live["text_queue"].put(("replace", diarized_text, "diarized"))
-                    transcribe["progress_queue"].put("diarize_done")
-                except Exception as exc:
-                    logger.exception("Diarization failed")
-                    _set_status(f"Diarization failed: {exc}")
+                    transcribe_path = mic_only_path
+                elif mode == "mic":
+                    mic_count = int(mic_channels_var.get())
+                    if mic_count > 2:
+                        segments_dir = paths["segments"]
+                        ensure_dir(segments_dir)
+                        front_path = os.path.join(
+                            segments_dir, f"{basename}.front.wav"
+                        )
+                        extract_channels(output_path, front_path, [0, 1])
+                        transcribe_path = front_path
 
-            title = title_var.get().strip() or context_type
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            audio_filename = os.path.basename(output_path)
-
-            participants = []
-            if user_name_var.get().strip():
-                participants.append(user_name_var.get().strip())
-            if contact_var.get().strip():
-                participants.append(contact_var.get().strip())
-            if attendees_var.get().strip():
-                participants.extend(
-                    [p.strip() for p in attendees_var.get().split(",") if p.strip()]
+                total_duration_s = (
+                    record_result.duration_seconds
+                    if record_result and record_result.duration_seconds
+                    else None
                 )
 
-            tags = [t.strip() for t in tags_var.get().split(",") if t.strip()]
-            if auto_tags_var.get():
-                if context_type and context_type not in tags:
-                    tags.append(context_type)
-                if project_var.get().strip() and project_var.get().strip() not in tags:
-                    tags.append(project_var.get().strip())
+                def _progress_cb(ratio: float) -> None:
+                    transcribe["progress_queue"].put(ratio)
 
-            note_text = render_note(
-                title=title,
-                date=date_str,
-                audio_filename=audio_filename,
-                segments=segments,
-                participants=participants or None,
-                tags=tags or None,
-                duration_seconds=record_result.duration_seconds,
-                device=mic_device_var.get().strip() or None,
-                sample_rate_hz=int(rate_var.get()),
-                bit_depth=16,
-                channels=int(
-                    mic_channels_var.get()
-                    if mode != "system"
-                    else system_channels_var.get()
-                ),
-                capture_mode=mode,
-                mic_device=mic_device_var.get().strip() or None,
-                system_device=system_device_var.get().strip() or None,
-                system_channels=int(system_channels_var.get()),
-                channel_map=_build_channel_map(mode),
-                context_type=context_type,
-                contact_name=contact_var.get().strip() or None,
-                contact_id=contact_id_var.get().strip() or None,
-                organization=org_var.get().strip() or None,
-                project=project_var.get().strip() or None,
-                location=location_var.get().strip() or None,
-                channel=channel_var.get().strip() or None,
-                context_notes=notes_box.get("1.0", "end").strip() or None,
-            )
+                segments = transcribe_audio(
+                    transcribe_path,
+                    model_name=model_var.get().strip() or "small",
+                    language=language_var.get().strip() or None,
+                    device=device_pref_var.get().strip() or None,
+                    compute_type=compute_type_var.get().strip() or None,
+                    progress_cb=_progress_cb,
+                    total_duration_s=total_duration_s,
+                )
+                transcribe["progress_queue"].put("done")
+                if segments:
+                    _set_status("Final transcription ready")
 
-            notes_dir = paths["notes"]
-            note_path = os.path.join(notes_dir, f"{basename}.md")
-            with open(note_path, "w", encoding="utf-8") as handle:
-                handle.write(note_text)
+                if diarize_var.get():
+                    _set_status("Diarizing...")
+                    transcribe["progress_queue"].put("diarize_start")
+                    try:
+                        speaker_map = {}
+                        for pair in speaker_map_var.get().split(","):
+                            if ":" in pair:
+                                k, v = pair.split(":", 1)
+                                speaker_map[k.strip()] = v.strip()
+                        segments = diarize_segments(
+                            transcribe_path,
+                            segments,
+                            speaker_map=speaker_map or None,
+                            hf_token=hf_token_var.get().strip() or None,
+                        )
+                        _set_status("Diarization complete")
+                        transcribe["progress_queue"].put("diarize_done")
+                    except Exception as exc:
+                        logger.exception("Diarization failed")
+                        _set_status(f"Diarization failed: {exc}")
 
-            segments_path = os.path.join(paths["segments"], f"{basename}.segments.json")
-            session_path = os.path.join(paths["sessions"], f"{basename}.session.json")
-            save_segments(segments_path, segments)
-            session = Session(
-                session_id=basename,
-                title=title,
-                started_at=date_str,
-                duration_seconds=record_result.duration_seconds,
-                audio_path=output_path,
-                segments=segments,
-                note_path=note_path,
-                ai_summary=None,
-                ai_sentiment=None,
-                context_type=context_type,
-                contact_name=contact_var.get().strip() or None,
-                contact_id=contact_id_var.get().strip() or None,
-                organization=org_var.get().strip() or None,
-                project=project_var.get().strip() or None,
-                location=location_var.get().strip() or None,
-                channel=channel_var.get().strip() or None,
-                context_notes=notes_box.get("1.0", "end").strip() or None,
-            )
-            save_session(session_path, session)
+                title = title_var.get().strip() or context_type
+                date_str = datetime.now().strftime("%Y-%m-%d")
+                audio_filename = os.path.basename(output_path)
 
-            _set_status(f"Saved: {note_path}")
-            logger.info("Note saved: %s", note_path)
+                participants = []
+                if user_name_var.get().strip():
+                    participants.append(user_name_var.get().strip())
+                if contact_var.get().strip():
+                    participants.append(contact_var.get().strip())
+                if attendees_var.get().strip():
+                    participants.extend(
+                        [p.strip() for p in attendees_var.get().split(",") if p.strip()]
+                    )
+
+                tags = [t.strip() for t in tags_var.get().split(",") if t.strip()]
+                if auto_tags_var.get():
+                    if context_type and context_type not in tags:
+                        tags.append(context_type)
+                    if project_var.get().strip() and project_var.get().strip() not in tags:
+                        tags.append(project_var.get().strip())
+
+                debug_log = _collect_debug_log(recording_start, datetime.now())
+                note_text = render_note(
+                    title=title,
+                    date=date_str,
+                    audio_filename=audio_filename,
+                    segments=segments,
+                    participants=participants or None,
+                    tags=tags or None,
+                    duration_seconds=record_result.duration_seconds,
+                    device=mic_device_var.get().strip() or None,
+                    sample_rate_hz=int(rate_var.get()),
+                    bit_depth=16,
+                    channels=int(
+                        mic_channels_var.get()
+                        if mode != "system"
+                        else system_channels_var.get()
+                    ),
+                    capture_mode=mode,
+                    mic_device=mic_device_var.get().strip() or None,
+                    system_device=system_device_var.get().strip() or None,
+                    system_channels=int(system_channels_var.get()),
+                    channel_map=_build_channel_map(mode),
+                    context_type=context_type,
+                    contact_name=contact_var.get().strip() or None,
+                    contact_id=contact_id_var.get().strip() or None,
+                    organization=org_var.get().strip() or None,
+                    project=project_var.get().strip() or None,
+                    location=location_var.get().strip() or None,
+                    channel=channel_var.get().strip() or None,
+                    context_notes=notes_box.get("1.0", "end").strip() or None,
+                    timestamped_notes=state["timestamped_notes"],
+                    debug_log=debug_log or None,
+                )
+
+                notes_dir = paths["notes"]
+                note_path = os.path.join(notes_dir, f"{basename}.md")
+                with open(note_path, "w", encoding="utf-8") as handle:
+                    handle.write(note_text)
+
+                segments_path = os.path.join(paths["segments"], f"{basename}.segments.json")
+                session_path = os.path.join(paths["sessions"], f"{basename}.session.json")
+                save_segments(segments_path, segments)
+                session = Session(
+                    session_id=basename,
+                    title=title,
+                    started_at=date_str,
+                    duration_seconds=record_result.duration_seconds,
+                    audio_path=output_path,
+                    segments=segments,
+                    note_path=note_path,
+                    ai_summary=None,
+                    ai_sentiment=None,
+                    context_type=context_type,
+                    contact_name=contact_var.get().strip() or None,
+                    contact_id=contact_id_var.get().strip() or None,
+                    organization=org_var.get().strip() or None,
+                    project=project_var.get().strip() or None,
+                    location=location_var.get().strip() or None,
+                    channel=channel_var.get().strip() or None,
+                    context_notes=notes_box.get("1.0", "end").strip() or None,
+                    timestamped_notes=list(state["timestamped_notes"]),
+                )
+                save_session(session_path, session)
+
+                _set_status(f"Saved: {note_path}")
+                logger.info("Note saved: %s", note_path)
+            except Exception as exc:
+                logger.exception("Recording workflow failed")
+                _set_status(f"Recording failed: {exc}")
+            finally:
+                if state["recording"]:
+                    state["recording"] = False
+                state["start_time"] = None
+                _stop_live_transcriber()
 
         state["thread"] = threading.Thread(target=_worker, daemon=True)
         state["thread"].start()
@@ -1201,6 +1406,8 @@ def launch_gui() -> None:
         context_type_var.set(
             config.context.get("default_context_type", presets["context_types"][0])
         )
+        state["timestamped_notes"] = []
+        _refresh_timestamped_notes()
         channel_var.set(
             config.context.get("default_channel", presets["channels"][0])
         )
@@ -1430,6 +1637,7 @@ def launch_gui() -> None:
                 _set_status(f"System device list failed: {exc}")
             _update_device_details()
             _set_status("Device list refreshed")
+            _schedule_monitor_refresh("devices_refresh")
 
         def _apply_mic_device(_event=None) -> None:
             name = mic_device_var.get().strip()
@@ -1446,18 +1654,29 @@ def launch_gui() -> None:
                 if int(mic_channels_var.get() or "1") > max_in:
                     mic_channels_var.set(str(max_in))
                 _set_status(f"Mic channels max {max_in}")
+            _schedule_monitor_refresh("mic_device")
 
         mic_device_combo.bind("<<ComboboxSelected>>", _apply_mic_device)
-        mic_device_combo.bind("<<ComboboxSelected>>", lambda _e: _update_device_details())
-        system_device_combo.bind(
+        mic_device_combo.bind(
             "<<ComboboxSelected>>", lambda _e: _update_device_details()
         )
+
+        def _apply_system_device(_event=None) -> None:
+            _update_device_details()
+            _schedule_monitor_refresh("system_device")
+
+        system_device_combo.bind("<<ComboboxSelected>>", _apply_system_device)
         _update_device_details()
 
         ttk.Button(frame, text="Refresh devices", command=_refresh_devices).grid(
             row=6, column=0, sticky="w", pady=(6, 0)
         )
-        ttk.Button(frame, text="Close", command=win.destroy).grid(
+
+        def _close_audio_settings() -> None:
+            win.destroy()
+            _ensure_monitoring("audio_settings_close")
+
+        ttk.Button(frame, text="Close", command=_close_audio_settings).grid(
             row=6, column=1, sticky="e", pady=(6, 0)
         )
 
@@ -1474,11 +1693,6 @@ def launch_gui() -> None:
             row=0, column=1, sticky="w"
         )
         _ToolTip(frame.winfo_children()[-1], "Whisper model for final transcript.")
-        ttk.Label(frame, text="Live model").grid(row=0, column=2, sticky="w")
-        ttk.Entry(frame, textvariable=live_model_var, width=12).grid(
-            row=0, column=3, sticky="w"
-        )
-        _ToolTip(frame.winfo_children()[-1], "Smaller model for live preview.")
 
         ttk.Label(frame, text="Language").grid(row=1, column=0, sticky="w")
         ttk.Entry(frame, textvariable=language_var, width=12).grid(
@@ -1498,29 +1712,25 @@ def launch_gui() -> None:
         )
         _ToolTip(frame.winfo_children()[-1], "Compute precision (int8/float16).")
 
-        ttk.Checkbutton(frame, text="Live transcription", variable=live_transcribe_var).grid(
-            row=4, column=0, columnspan=2, sticky="w"
-        )
-        _ToolTip(frame.winfo_children()[-1], "Enable the live preview panel.")
         ttk.Checkbutton(frame, text="Diarize", variable=diarize_var).grid(
-            row=5, column=0, columnspan=2, sticky="w"
+            row=4, column=0, columnspan=2, sticky="w"
         )
         _ToolTip(frame.winfo_children()[-1], "Run speaker diarization after transcription.")
 
-        ttk.Label(frame, text="HF token").grid(row=6, column=0, sticky="w")
+        ttk.Label(frame, text="HF token").grid(row=5, column=0, sticky="w")
         ttk.Entry(frame, textvariable=hf_token_var, width=32, show="*").grid(
-            row=6, column=1, sticky="w"
+            row=5, column=1, sticky="w"
         )
         _ToolTip(frame.winfo_children()[-1], "HuggingFace token for diarization models.")
 
-        ttk.Label(frame, text="Speaker map").grid(row=7, column=0, sticky="w")
+        ttk.Label(frame, text="Speaker map").grid(row=6, column=0, sticky="w")
         ttk.Entry(frame, textvariable=speaker_map_var, width=32).grid(
-            row=7, column=1, sticky="w"
+            row=6, column=1, sticky="w"
         )
         _ToolTip(frame.winfo_children()[-1], "Map speaker IDs (Speaker_0:Name).")
 
         ttk.Button(frame, text="Close", command=win.destroy).grid(
-            row=8, column=1, sticky="e", pady=(6, 0)
+            row=7, column=1, sticky="e", pady=(6, 0)
         )
 
     def _open_output_settings() -> None:
@@ -1618,12 +1828,16 @@ def launch_gui() -> None:
             _set_status("My profile saved")
             win.destroy()
 
-        ttk.Button(frame, text="Save and Close", command=_save_my_profile).grid(
+        save_btn = ttk.Button(frame, text="Save and Close", command=_save_my_profile)
+        save_btn.grid(
             row=8, column=0, sticky="w", pady=(6, 0)
         )
-        ttk.Button(frame, text="Cancel", command=win.destroy).grid(
+        cancel_btn = ttk.Button(frame, text="Cancel", command=win.destroy)
+        cancel_btn.grid(
             row=8, column=1, sticky="e", pady=(6, 0)
         )
+        _ToolTip(save_btn, "Save defaults and apply them immediately.")
+        _ToolTip(cancel_btn, "Close without saving.")
 
     def _open_manage_lists() -> None:
         logger.info("Open manage lists")
@@ -1640,10 +1854,12 @@ def launch_gui() -> None:
             list_var = tk.StringVar(value=items)
             listbox = tk.Listbox(tab, listvariable=list_var, height=8, width=30)
             listbox.grid(row=0, column=0, rowspan=4, padx=(0, 6), sticky="ns")
+            _ToolTip(listbox, f"{label} list. Select an item to edit or delete.")
 
             entry_var = tk.StringVar()
             entry = ttk.Entry(tab, textvariable=entry_var, width=26)
             entry.grid(row=0, column=1, sticky="w")
+            _ToolTip(entry, f"Enter a {label.lower()} value.")
 
             def _refresh():
                 list_var.set(items)
@@ -1672,9 +1888,15 @@ def launch_gui() -> None:
                 items.pop(idx)
                 _refresh()
 
-            ttk.Button(tab, text="Add", command=_add).grid(row=1, column=1, sticky="w")
-            ttk.Button(tab, text="Edit", command=_edit).grid(row=2, column=1, sticky="w")
-            ttk.Button(tab, text="Delete", command=_delete).grid(row=3, column=1, sticky="w")
+            add_btn = ttk.Button(tab, text="Add", command=_add)
+            add_btn.grid(row=1, column=1, sticky="w")
+            edit_btn = ttk.Button(tab, text="Edit", command=_edit)
+            edit_btn.grid(row=2, column=1, sticky="w")
+            del_btn = ttk.Button(tab, text="Delete", command=_delete)
+            del_btn.grid(row=3, column=1, sticky="w")
+            _ToolTip(add_btn, f"Add the {label.lower()} value.")
+            _ToolTip(edit_btn, f"Replace the selected {label.lower()} value.")
+            _ToolTip(del_btn, f"Delete the selected {label.lower()} value.")
             return tab
 
         notebook.add(_build_list_tab("Organizations", presets["organizations"]), text="Organizations")
@@ -1691,6 +1913,7 @@ def launch_gui() -> None:
             profiles_tab, listvariable=profile_var_list, height=8, width=30
         )
         profile_listbox.grid(row=0, column=0, rowspan=4, padx=(0, 6), sticky="ns")
+        _ToolTip(profile_listbox, "Saved profiles for quick metadata fill.")
 
         def _refresh_profiles():
             profile_var_list.set([p.get("name", "") for p in presets["profiles"]])
@@ -1713,17 +1936,29 @@ def launch_gui() -> None:
             )
 
             ttk.Label(f, text="Name").grid(row=0, column=0, sticky="w")
-            ttk.Entry(f, textvariable=name_var, width=24).grid(row=0, column=1, sticky="w")
+            name_entry = ttk.Entry(f, textvariable=name_var, width=24)
+            name_entry.grid(row=0, column=1, sticky="w")
+            _ToolTip(name_entry, "Profile name.")
             ttk.Label(f, text="Context").grid(row=1, column=0, sticky="w")
-            ttk.Entry(f, textvariable=ctx_var, width=24).grid(row=1, column=1, sticky="w")
+            ctx_entry = ttk.Entry(f, textvariable=ctx_var, width=24)
+            ctx_entry.grid(row=1, column=1, sticky="w")
+            _ToolTip(ctx_entry, "Context type to apply.")
             ttk.Label(f, text="Channel").grid(row=2, column=0, sticky="w")
-            ttk.Entry(f, textvariable=chan_var, width=24).grid(row=2, column=1, sticky="w")
+            chan_entry = ttk.Entry(f, textvariable=chan_var, width=24)
+            chan_entry.grid(row=2, column=1, sticky="w")
+            _ToolTip(chan_entry, "Channel to apply.")
             ttk.Label(f, text="Org").grid(row=3, column=0, sticky="w")
-            ttk.Entry(f, textvariable=org_var_p, width=24).grid(row=3, column=1, sticky="w")
+            org_entry = ttk.Entry(f, textvariable=org_var_p, width=24)
+            org_entry.grid(row=3, column=1, sticky="w")
+            _ToolTip(org_entry, "Organization to apply.")
             ttk.Label(f, text="Project").grid(row=4, column=0, sticky="w")
-            ttk.Entry(f, textvariable=proj_var, width=24).grid(row=4, column=1, sticky="w")
+            proj_entry = ttk.Entry(f, textvariable=proj_var, width=24)
+            proj_entry.grid(row=4, column=1, sticky="w")
+            _ToolTip(proj_entry, "Project to apply.")
             ttk.Label(f, text="Tags").grid(row=5, column=0, sticky="w")
-            ttk.Entry(f, textvariable=tags_var_p, width=24).grid(row=5, column=1, sticky="w")
+            tags_entry = ttk.Entry(f, textvariable=tags_var_p, width=24)
+            tags_entry.grid(row=5, column=1, sticky="w")
+            _ToolTip(tags_entry, "Comma-separated tags.")
 
             def _save_profile_edit() -> None:
                 name = name_var.get().strip()
@@ -1742,12 +1977,16 @@ def launch_gui() -> None:
                 _refresh_profiles()
                 win_p.destroy()
 
-            ttk.Button(f, text="Save", command=_save_profile_edit).grid(
+            save_btn = ttk.Button(f, text="Save", command=_save_profile_edit)
+            save_btn.grid(
                 row=6, column=0, sticky="w", pady=(6, 0)
             )
-            ttk.Button(f, text="Cancel", command=win_p.destroy).grid(
+            cancel_btn = ttk.Button(f, text="Cancel", command=win_p.destroy)
+            cancel_btn.grid(
                 row=6, column=1, sticky="e", pady=(6, 0)
             )
+            _ToolTip(save_btn, "Save profile changes.")
+            _ToolTip(cancel_btn, "Close without saving.")
 
         def _add_profile():
             _profile_dialog()
@@ -1769,15 +2008,21 @@ def launch_gui() -> None:
             presets["profiles"] = [p for p in presets["profiles"] if p.get("name") != name]
             _refresh_profiles()
 
-        ttk.Button(profiles_tab, text="Add", command=_add_profile).grid(
+        add_btn = ttk.Button(profiles_tab, text="Add", command=_add_profile)
+        add_btn.grid(
             row=1, column=1, sticky="w"
         )
-        ttk.Button(profiles_tab, text="Edit", command=_edit_profile).grid(
+        edit_btn = ttk.Button(profiles_tab, text="Edit", command=_edit_profile)
+        edit_btn.grid(
             row=2, column=1, sticky="w"
         )
-        ttk.Button(profiles_tab, text="Delete", command=_delete_profile).grid(
+        del_btn = ttk.Button(profiles_tab, text="Delete", command=_delete_profile)
+        del_btn.grid(
             row=3, column=1, sticky="w"
         )
+        _ToolTip(add_btn, "Create a new profile.")
+        _ToolTip(edit_btn, "Edit the selected profile.")
+        _ToolTip(del_btn, "Delete the selected profile.")
 
         def _save_lists() -> None:
             config.context["context_types"] = presets["context_types"]
@@ -1796,12 +2041,16 @@ def launch_gui() -> None:
 
         btn_row_lists = ttk.Frame(frame)
         btn_row_lists.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        ttk.Button(btn_row_lists, text="Save", command=_save_lists).grid(
+        save_btn = ttk.Button(btn_row_lists, text="Save", command=_save_lists)
+        save_btn.grid(
             row=0, column=0, sticky="w"
         )
-        ttk.Button(btn_row_lists, text="Close", command=win.destroy).grid(
+        close_btn = ttk.Button(btn_row_lists, text="Close", command=win.destroy)
+        close_btn.grid(
             row=0, column=1, sticky="e", padx=(6, 0)
         )
+        _ToolTip(save_btn, "Persist list changes to config.")
+        _ToolTip(close_btn, "Close the list manager.")
 
     def _save_profile_dialog() -> None:
         logger.info("Open save profile dialog")
@@ -1812,20 +2061,26 @@ def launch_gui() -> None:
         frame.grid(row=0, column=0, sticky="nsew")
         profile_name_var.set(profile_var.get().strip())
         ttk.Label(frame, text="Profile name").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=profile_name_var, width=24).grid(
+        name_entry = ttk.Entry(frame, textvariable=profile_name_var, width=24)
+        name_entry.grid(
             row=0, column=1, sticky="w"
         )
+        _ToolTip(name_entry, "Name for saving the current metadata as a profile.")
 
         def _save_and_close() -> None:
             _save_profile()
             win.destroy()
 
-        ttk.Button(frame, text="Save", command=_save_and_close).grid(
+        save_btn = ttk.Button(frame, text="Save", command=_save_and_close)
+        save_btn.grid(
             row=1, column=0, sticky="w", pady=(6, 0)
         )
-        ttk.Button(frame, text="Cancel", command=win.destroy).grid(
+        cancel_btn = ttk.Button(frame, text="Cancel", command=win.destroy)
+        cancel_btn.grid(
             row=1, column=1, sticky="e", pady=(6, 0)
         )
+        _ToolTip(save_btn, "Save the profile and close.")
+        _ToolTip(cancel_btn, "Close without saving.")
 
     settings_menu.add_command(label="Audio settings...", command=_open_audio_settings)
     settings_menu.add_command(
@@ -1881,6 +2136,7 @@ def launch_gui() -> None:
     profile_var = tk.StringVar(value=_last_used_value("profile", ""))
     profile_name_var = tk.StringVar()
     notes_box = None
+    notes_list = None
 
     capture_mode_var = tk.StringVar(
         value=_last_used_value("capture_mode", "mic")
@@ -1913,8 +2169,21 @@ def launch_gui() -> None:
         value=bool(last_used.get("use_type_folders", config.context.get("use_type_folders", False)))
     )
     live_transcribe_var = tk.BooleanVar(
-        value=bool(last_used.get("live_transcribe", True))
+        value=bool(last_used.get("live_transcribe", False))
     )
+
+    def _bind_monitor_refresh(var: tk.Variable) -> None:
+        var.trace_add("write", lambda *_: _schedule_monitor_refresh("config_change"))
+
+    for _var in (
+        capture_mode_var,
+        mic_device_var,
+        system_device_var,
+        rate_var,
+        mic_channels_var,
+        system_channels_var,
+    ):
+        _bind_monitor_refresh(_var)
 
     def _auto_configure_system_device() -> None:
         if system_device_var.get().strip():
@@ -2063,7 +2332,22 @@ def launch_gui() -> None:
     )
     notes_box.grid(row=7, column=1, columnspan=3, sticky="ew")
     notes_box.insert("1.0", _last_used_value("notes", ""))
-    _ToolTip(notes_box, "Freeform notes to compare with the transcript.")
+    _ToolTip(notes_box, "Freeform notes to capture context during recording.")
+
+    notes_frame = ttk.LabelFrame(main, text="Timestamped notes", style="Neo.TLabelframe")
+    notes_frame.grid(row=5, column=0, sticky="ew", pady=(6, 0))
+    notes_entry_var = tk.StringVar()
+    notes_entry = ttk.Entry(notes_frame, textvariable=notes_entry_var, width=48)
+    notes_entry.grid(row=0, column=0, sticky="w", padx=(6, 4), pady=6)
+    add_note_btn = ttk.Button(notes_frame, text="Add note")
+    add_note_btn.grid(row=0, column=1, sticky="w", padx=(0, 6), pady=6)
+    notes_list = tk.Listbox(
+        notes_frame, height=3, bg="#0b0f14", fg="#d8e1ff", highlightthickness=0, bd=0
+    )
+    notes_list.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
+    _ToolTip(notes_entry, "Add a timestamped note tied to the current recording time.")
+    _ToolTip(add_note_btn, "Capture a timestamped note.")
+    _ToolTip(notes_list, "Notes captured during recording (stored in the note).")
 
     btn_row = ttk.Frame(main)
     btn_row.grid(row=3, column=0, sticky="w", pady=(6, 0))
@@ -2085,21 +2369,33 @@ def launch_gui() -> None:
     ttk.Button(control_row, text="Clear", command=_clear_fields).grid(
         row=0, column=2, padx=2
     )
-    ttk.Button(control_row, text="Monitor", command=_toggle_monitor).grid(
-        row=0, column=3, padx=2
-    )
     ttk.Button(control_row, text="Reset Peaks", command=_reset_peaks).grid(
-        row=0, column=4, padx=2
+        row=0, column=3, padx=2
     )
     buttons = control_row.winfo_children()
     _ToolTip(buttons[0], "Start recording with current metadata.")
     _ToolTip(buttons[1], "Stop recording and begin transcription.")
     _ToolTip(buttons[2], "Clear metadata fields (keeps defaults).")
-    _ToolTip(buttons[3], "Toggle live meter monitoring only.")
-    _ToolTip(buttons[4], "Reset peak hold indicators.")
+    _ToolTip(buttons[3], "Reset peak hold indicators.")
+
+    def _add_timestamped_note(_event=None) -> None:
+        text = notes_entry_var.get().strip()
+        if not text:
+            return
+        elapsed = 0
+        if state["recording"] and state["start_time"]:
+            elapsed = time.time() - state["start_time"]
+        stamp = _format_timestamp(elapsed)
+        state["timestamped_notes"].append({"timestamp": stamp, "text": text})
+        notes_entry_var.set("")
+        _refresh_timestamped_notes()
+        _set_status(f"Timestamped note added at {stamp}")
+
+    add_note_btn.configure(command=_add_timestamped_note)
+    notes_entry.bind("<Return>", _add_timestamped_note)
 
     meter_frame = ttk.LabelFrame(main, text="Live audio meters", style="Neo.TLabelframe")
-    meter_frame.grid(row=5, column=0, sticky="ew", pady=(6, 0))
+    meter_frame.grid(row=6, column=0, sticky="ew", pady=(6, 0))
     meter_canvas = tk.Canvas(
         meter_frame,
         width=520,
@@ -2111,10 +2407,23 @@ def launch_gui() -> None:
     meter_canvas.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
     _ToolTip(meter_canvas, "Per-channel level meters and peak holds.")
 
-    transcript_frame = ttk.LabelFrame(main, text="Live transcript", style="Neo.TLabelframe")
-    transcript_frame.grid(row=6, column=0, sticky="ew", pady=(6, 0))
-    transcript_box = tk.Text(
-        transcript_frame,
+    waveform_frame = ttk.LabelFrame(main, text="Live waveform", style="Neo.TLabelframe")
+    waveform_frame.grid(row=7, column=0, sticky="ew", pady=(6, 0))
+    waveform_canvas = tk.Canvas(
+        waveform_frame,
+        width=520,
+        height=120,
+        bg="#0f1a2a",
+        highlightthickness=0,
+        bd=0,
+    )
+    waveform_canvas.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
+    _ToolTip(waveform_canvas, "Live waveform with transcription progress overlay.")
+
+    feed_frame = ttk.LabelFrame(main, text="System feed", style="Neo.TLabelframe")
+    feed_frame.grid(row=8, column=0, sticky="ew", pady=(6, 0))
+    feed_box = tk.Text(
+        feed_frame,
         width=60,
         height=5,
         wrap="word",
@@ -2125,15 +2434,12 @@ def launch_gui() -> None:
         bd=0,
         relief="flat",
     )
-    transcript_box.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
-    transcript_box.configure(state="disabled")
-    _ToolTip(transcript_box, "Live transcript (red), final (orange), diarized (green).")
-    transcript_box.tag_configure("live", foreground="#ff4d6d")
-    transcript_box.tag_configure("final", foreground="#ff9f43")
-    transcript_box.tag_configure("diarized", foreground="#32ff7e")
+    feed_box.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
+    feed_box.configure(state="disabled")
+    _ToolTip(feed_box, "Process updates, device changes, and recording status.")
 
     progress_frame = ttk.Frame(main)
-    progress_frame.grid(row=7, column=0, sticky="ew", pady=(6, 0))
+    progress_frame.grid(row=9, column=0, sticky="ew", pady=(6, 0))
     progress_label_var = tk.StringVar(value="Final transcription idle")
     ttk.Label(progress_frame, textvariable=progress_label_var).grid(
         row=0, column=0, sticky="w"
@@ -2151,7 +2457,7 @@ def launch_gui() -> None:
     _ToolTip(progress_frame, "Progress for final transcription and diarization.")
 
     status_row = ttk.Frame(main)
-    status_row.grid(row=8, column=0, sticky="ew", pady=(6, 0))
+    status_row.grid(row=10, column=0, sticky="ew", pady=(6, 0))
     timer_var = tk.StringVar(value="00:00")
     ttk.Label(status_row, textvariable=timer_var).grid(row=0, column=0, sticky="w")
     level_var = tk.StringVar(value="0.00")
@@ -2218,13 +2524,16 @@ def launch_gui() -> None:
     def _on_close() -> None:
         logger.info("GUI closing")
         _stop_live_transcriber()
+        _stop_monitoring()
         _save_last_used()
         root.destroy()
 
     _bind_preset_updates()
     _update_timer()
     _update_meter()
-    _poll_transcript()
+    _update_waveform()
+    _poll_feed()
     _poll_transcribe_progress()
+    root.after(250, lambda: _ensure_monitoring("launch"))
     root.protocol("WM_DELETE_WINDOW", _on_close)
     root.mainloop()

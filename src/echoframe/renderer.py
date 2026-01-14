@@ -33,6 +33,8 @@ def render_note(
     location: Optional[str] = None,
     channel: Optional[str] = None,
     context_notes: Optional[str] = None,
+    timestamped_notes: Optional[List[dict]] = None,
+    debug_log: Optional[str] = None,
 ) -> str:
     lines: List[str] = []
     lines.append("---")
@@ -97,10 +99,25 @@ def render_note(
         lines.append("")
         lines.append(context_notes)
         lines.append("")
+    if timestamped_notes:
+        lines.append("## Notes Timeline")
+        lines.append("")
+        for note in timestamped_notes:
+            stamp = note.get("timestamp", "00:00")
+            text = note.get("text", "")
+            lines.append(f"- [{stamp}] {text}")
+        lines.append("")
     lines.append("## Transcript")
     lines.append("")
     for seg in segments:
         speaker = f" {seg.speaker}:" if seg.speaker else ""
         lines.append(f"[{seg.start:0>8.2f}]{speaker} {seg.text}")
     lines.append("")
+    if debug_log:
+        lines.append("## Debug Log")
+        lines.append("")
+        lines.append("```text")
+        lines.extend(debug_log.splitlines())
+        lines.append("```")
+        lines.append("")
     return "\n".join(lines)
