@@ -15,6 +15,12 @@ schema: 1
 ---
 # EchoFrame TODO
 
+## MVP priorities
+- [ ] Use `base_dir` for output paths in GUI and CLI (Recordings/Notes)
+- [ ] Emit capture metadata in notes (capture_mode, mic/system devices, channel_map)
+- [ ] Ensure transcription/diarization use mic-only channels in dual-track mode
+- [ ] Session metadata persistence (session.json, segments.json)
+
 ## Core pipeline
 - [x] Project scaffold and module stubs
 - [x] Device detection (Zoom H2/H4 preference)
