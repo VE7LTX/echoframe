@@ -303,11 +303,13 @@ echoframe show path/to/session.session.json
 The Tkinter bar wraps the capture pipeline with a compact layout:
 - Context fields: title, participants, contact, org/project, channel, notes
 - Presets and profiles for quick context reuse
+- My Profile defaults and list management for metadata dropdowns
 - Capture mode: mic / system / dual
 - Mic/system device selection and channel counts
 - Live timer, status text, and audio level monitor
+- Live transcript preview (fast model) and final transcript progress bar
 - Optional HUD meter with colored bars and peak hold
-- Transcription and diarization run after stop
+- Transcription and diarization run after stop (final model + optional diarization)
 
 App audio isolation (Windows, no virtual cable):
 - Route Zoom/Teams/Meet output to a dedicated output device.

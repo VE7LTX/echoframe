@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 
 
 @dataclass
@@ -24,11 +24,22 @@ def list_input_devices(loopback: bool = False) -> List[Dict[str, Any]]:
     return [d for d in devices if d.get("max_input_channels", 0) > 0]
 
 
-def find_input_device(prefer_name: Optional[str] = None, loopback: bool = False) -> dict:
-    candidates = list_input_devices(loopback=loopback)
+ZOOM_NAME_MARKERS = (
+    "zoom h2",
+    "zoom h4",
+    "zoom h series",
+    "zoom recording mixer",
+    "zoom h series audio",
+    "zoom h series asio",
+)
+
+
+def select_preferred_device(
+    candidates: List[Dict[str, Any]],
+    prefer_name: Optional[str] = None,
+) -> Dict[str, Any]:
     if not candidates:
         raise RuntimeError("No input devices found.")
-
     if prefer_name:
         preferred = [
             d for d in candidates if prefer_name.lower() in d.get("name", "").lower()
@@ -36,16 +47,45 @@ def find_input_device(prefer_name: Optional[str] = None, loopback: bool = False)
         if preferred:
             return preferred[0]
 
-    zoom_hits = [
-        d
-        for d in candidates
-        if "zoom h2" in d.get("name", "").lower()
-        or "zoom h4" in d.get("name", "").lower()
-    ]
-    if zoom_hits:
-        return zoom_hits[0]
+    zoom_name = find_zoom_name_from_candidates(candidates)
+    if zoom_name:
+        return next(d for d in candidates if d.get("name") == zoom_name)
 
     return candidates[0]
+
+
+def find_zoom_name_from_candidates(
+    candidates: List[Dict[str, Any]],
+) -> Optional[str]:
+    for device in candidates:
+        name = device.get("name", "").lower()
+        if any(marker in name for marker in ZOOM_NAME_MARKERS):
+            return device.get("name")
+    return None
+
+
+def find_zoom_input_device_name() -> Optional[str]:
+    candidates = list_input_devices(loopback=False)
+    return find_zoom_name_from_candidates(candidates)
+
+
+def find_device_info_by_name(
+    name: Optional[str],
+    loopback: bool = False,
+) -> Optional[Dict[str, Any]]:
+    if not name:
+        return None
+    candidates = list_input_devices(loopback=loopback)
+    name_lower = name.lower()
+    for device in candidates:
+        if name_lower in device.get("name", "").lower():
+            return device
+    return None
+
+
+def find_input_device(prefer_name: Optional[str] = None, loopback: bool = False) -> dict:
+    candidates = list_input_devices(loopback=loopback)
+    return select_preferred_device(candidates, prefer_name=prefer_name)
 
 
 def record_audio(
@@ -74,7 +114,10 @@ def record_audio(
 
     extra_settings = None
     if loopback and hasattr(sd, "WasapiSettings"):
-        extra_settings = sd.WasapiSettings(loopback=True)
+        try:
+            extra_settings = sd.WasapiSettings(loopback=True)
+        except TypeError:
+            extra_settings = None
 
     recording = sd.rec(
         frames,
@@ -107,6 +150,7 @@ def record_audio_stream(
     device_name: Optional[str] = None,
     stop_event=None,
     loopback: bool = False,
+    on_chunk: Optional[Callable[[Any], None]] = None,
 ) -> RecordingResult:
     try:
         import sounddevice as sd
@@ -130,6 +174,8 @@ def record_audio_stream(
                 return
             handle.writeframes(indata.tobytes())
             frames_written += _frames
+            if on_chunk is not None:
+                on_chunk(indata.copy())
 
         extra_settings = None
         if loopback and hasattr(sd, "WasapiSettings"):
@@ -163,6 +209,7 @@ def record_audio_stream_dual(
     system_device_name: Optional[str] = None,
     stop_event=None,
     duration_seconds: Optional[int] = None,
+    on_chunk: Optional[Callable[[Any], None]] = None,
 ) -> RecordingResult:
     try:
         import sounddevice as sd
@@ -189,7 +236,10 @@ def record_audio_stream_dual(
     blocksize = 1024
     extra_settings = None
     if hasattr(sd, "WasapiSettings"):
-        extra_settings = sd.WasapiSettings(loopback=True)
+        try:
+            extra_settings = sd.WasapiSettings(loopback=True)
+        except TypeError:
+            extra_settings = None
 
     with wave.open(output_path, "wb") as handle:
         handle.setnchannels(mic_channels + system_channels)
@@ -229,6 +279,8 @@ def record_audio_stream_dual(
                 combined = np.concatenate([mic_data, sys_data], axis=1)
                 handle.writeframes(combined.tobytes())
                 frames_written += combined.shape[0]
+                if on_chunk is not None:
+                    on_chunk(mic_data.copy())
 
                 if target_frames and frames_written >= target_frames:
                     break

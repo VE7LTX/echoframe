@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional, Callable
 from .models import Segment
 
 
@@ -12,6 +12,8 @@ def transcribe_audio(
     language: str | None = None,
     device: str | None = None,
     compute_type: str | None = None,
+    progress_cb: Optional[Callable[[float], None]] = None,
+    total_duration_s: Optional[float] = None,
 ) -> List[Segment]:
     try:
         from faster_whisper import WhisperModel
@@ -31,4 +33,7 @@ def transcribe_audio(
     output: List[Segment] = []
     for seg in segments:
         output.append(Segment(start=seg.start, end=seg.end, text=seg.text.strip()))
+        if progress_cb and total_duration_s:
+            progress = min(max(seg.end / total_duration_s, 0.0), 1.0)
+            progress_cb(progress)
     return output

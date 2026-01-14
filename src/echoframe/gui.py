@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import threading
 import time
 from datetime import datetime
 
 from .config import Config, load_config, save_config
 from .diarizer import diarize_segments
-from .recorder import record_audio_stream, record_audio_stream_dual
+from .recorder import (
+    find_zoom_name_from_candidates,
+    list_input_devices,
+    record_audio_stream,
+    record_audio_stream_dual,
+)
 from .renderer import render_note
 from .storage import build_session_basename, ensure_dir, ensure_structure, get_output_dirs
 from .transcriber import transcribe_audio
@@ -27,6 +33,89 @@ def launch_gui() -> None:
     root = tk.Tk()
     root.title("EchoFrame")
     root.resizable(False, False)
+    root.configure(bg="#0b0f14")
+
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    style.configure("TFrame", background="#0b0f14")
+    style.configure("TLabel", background="#0b0f14", foreground="#d8e1ff")
+    style.configure(
+        "TLabelFrame",
+        background="#0b0f14",
+        foreground="#8bd3ff",
+    )
+    style.configure(
+        "TLabelFrame.Label",
+        background="#0b0f14",
+        foreground="#8bd3ff",
+    )
+    style.configure(
+        "Neo.TLabelframe",
+        background="#0b0f14",
+        foreground="#8bd3ff",
+        bordercolor="#0f1a2a",
+        lightcolor="#0f1a2a",
+        darkcolor="#0f1a2a",
+    )
+    style.configure(
+        "Neo.TLabelframe.Label",
+        background="#0b0f14",
+        foreground="#8bd3ff",
+    )
+    style.configure(
+        "TButton",
+        background="#132033",
+        foreground="#e6f1ff",
+        borderwidth=1,
+        relief="flat",
+    )
+    style.map(
+        "TButton",
+        background=[("active", "#1b2a44")],
+        foreground=[("active", "#ffffff")],
+    )
+    style.configure(
+        "TEntry",
+        fieldbackground="#111827",
+        foreground="#e6f1ff",
+        background="#111827",
+        bordercolor="#1b2a44",
+        lightcolor="#1b2a44",
+        darkcolor="#1b2a44",
+        relief="flat",
+    )
+    style.configure(
+        "TCombobox",
+        fieldbackground="#111827",
+        foreground="#e6f1ff",
+        background="#111827",
+        bordercolor="#1b2a44",
+        lightcolor="#1b2a44",
+        darkcolor="#1b2a44",
+    )
+    style.map(
+        "TCombobox",
+        fieldbackground=[("readonly", "#111827")],
+        foreground=[("readonly", "#e6f1ff")],
+        selectbackground=[("readonly", "#132033")],
+        selectforeground=[("readonly", "#e6f1ff")],
+    )
+    style.configure(
+        "TCheckbutton",
+        background="#0b0f14",
+        foreground="#9ad1ff",
+    )
+    style.configure(
+        "Neo.Horizontal.TProgressbar",
+        troughcolor="#0f1a2a",
+        background="#00e0ff",
+        bordercolor="#0f1a2a",
+        lightcolor="#00e0ff",
+        darkcolor="#00b3cc",
+    )
 
     config_path = "echoframe_config.yml"
     if os.path.exists(config_path):
@@ -85,6 +174,14 @@ def launch_gui() -> None:
             ],
         ),
     }
+    last_used = config.context.get("last_used", {})
+    my_profile = config.context.get("my_profile", {})
+
+    def _last_used_value(key: str, fallback: str = "") -> str:
+        value = last_used.get(key)
+        if value is None or value == "":
+            return fallback
+        return value
 
     state = {
         "recording": False,
@@ -93,14 +190,24 @@ def launch_gui() -> None:
         "thread": None,
     }
     monitor = {
-        "stream": None,
+        "streams": [],
         "level": 0.0,
         "peak": 0.0,
         "lock": threading.Lock(),
         "channels": [],
         "peaks": [],
+        "labels": [],
         "hud": None,
         "hud_canvas": None,
+    }
+    live = {
+        "audio_queue": None,
+        "text_queue": queue.Queue(),
+        "stop_event": threading.Event(),
+        "thread": None,
+    }
+    transcribe = {
+        "progress_queue": queue.Queue(),
     }
 
     class _ToolTip:
@@ -139,6 +246,41 @@ def launch_gui() -> None:
         status_var.set(text)
         logger.info(text)
 
+    def _log_fields(context: str) -> None:
+        payload = {
+            "title": title_var.get().strip(),
+            "user_name": user_name_var.get().strip(),
+            "attendees": attendees_var.get().strip(),
+            "contact": contact_var.get().strip(),
+            "contact_id": contact_id_var.get().strip(),
+            "org": org_var.get().strip(),
+            "project": project_var.get().strip(),
+            "location": location_var.get().strip(),
+            "channel": channel_var.get().strip(),
+            "tags": tags_var.get().strip(),
+            "context_type": context_type_var.get().strip(),
+            "profile": profile_var.get().strip(),
+            "capture_mode": capture_mode_var.get().strip(),
+            "mic_device": mic_device_var.get().strip(),
+            "system_device": system_device_var.get().strip(),
+            "rate": rate_var.get().strip(),
+            "mic_channels": mic_channels_var.get().strip(),
+            "system_channels": system_channels_var.get().strip(),
+            "model": model_var.get().strip(),
+            "language": language_var.get().strip(),
+            "device_pref": device_pref_var.get().strip(),
+            "compute_type": compute_type_var.get().strip(),
+            "live_model": live_model_var.get().strip(),
+            "diarize": diarize_var.get(),
+            "auto_tags": auto_tags_var.get(),
+            "live_transcribe": live_transcribe_var.get(),
+        }
+        logger.debug("UI fields (%s): %s", context, payload)
+
+    def _log_field_change(field_name: str) -> None:
+        logger.debug("Field updated: %s", field_name)
+        _log_fields(f"field:{field_name}")
+
     def _remember_preset(key: str, value: str) -> None:
         value = value.strip()
         if not value:
@@ -159,7 +301,80 @@ def launch_gui() -> None:
         config.context["use_type_folders"] = use_type_folders_var.get()
         config.context["debug_logging"] = debug_enabled_var.get()
         save_config(config_path, config)
+        _log_fields("save_defaults")
         _set_status("Defaults saved")
+
+    def _collect_last_used() -> dict:
+        return {
+            "title": title_var.get().strip(),
+            "user_name": user_name_var.get().strip(),
+            "attendees": attendees_var.get().strip(),
+            "contact": contact_var.get().strip(),
+            "contact_id": contact_id_var.get().strip(),
+            "org": org_var.get().strip(),
+            "project": project_var.get().strip(),
+            "location": location_var.get().strip(),
+            "channel": channel_var.get().strip(),
+            "notes": notes_box.get("1.0", "end").strip(),
+            "tags": tags_var.get().strip(),
+            "context_type": context_type_var.get().strip(),
+            "profile": profile_var.get().strip(),
+            "capture_mode": capture_mode_var.get().strip(),
+            "mic_device": mic_device_var.get().strip(),
+            "system_device": system_device_var.get().strip(),
+            "rate": rate_var.get().strip(),
+            "mic_channels": mic_channels_var.get().strip(),
+            "system_channels": system_channels_var.get().strip(),
+            "model": model_var.get().strip(),
+            "language": language_var.get().strip(),
+            "device_pref": device_pref_var.get().strip(),
+            "compute_type": compute_type_var.get().strip(),
+            "live_model": live_model_var.get().strip(),
+            "diarize": diarize_var.get(),
+            "hf_token": hf_token_var.get().strip(),
+            "speaker_map": speaker_map_var.get().strip(),
+            "auto_tags": auto_tags_var.get(),
+            "use_type_folders": use_type_folders_var.get(),
+            "live_transcribe": live_transcribe_var.get(),
+        }
+
+    def _save_last_used() -> None:
+        config.context["last_used"] = _collect_last_used()
+        config.context["user_name"] = user_name_var.get().strip()
+        config.device_name = mic_device_var.get().strip() or None
+        config.whisper_model = model_var.get().strip() or "small"
+        config.language = language_var.get().strip() or None
+        try:
+            config.audio.sample_rate_hz = int(rate_var.get())
+        except ValueError:
+            pass
+        try:
+            config.audio.channels = int(mic_channels_var.get())
+        except ValueError:
+            pass
+        config.diarization = diarize_var.get()
+        save_config(config_path, config)
+        _log_fields("save_last_used")
+
+    def _apply_my_profile(values: dict) -> None:
+        if not values:
+            return
+        if values.get("user_name"):
+            user_name_var.set(values.get("user_name", ""))
+        if values.get("org"):
+            org_var.set(values.get("org", ""))
+        if values.get("project"):
+            project_var.set(values.get("project", ""))
+        if values.get("channel"):
+            channel_var.set(values.get("channel", channel_var.get()))
+        if values.get("tags"):
+            tags_var.set(values.get("tags", ""))
+        if values.get("location"):
+            location_var.set(values.get("location", ""))
+        if values.get("language"):
+            language_var.set(values.get("language", ""))
+        if values.get("default_context_type"):
+            context_type_var.set(values.get("default_context_type", ""))
 
     def _update_timer() -> None:
         if state["recording"] and state["start_time"]:
@@ -174,34 +389,40 @@ def launch_gui() -> None:
             peak = monitor["peak"]
             channels = list(monitor["channels"])
             peaks = list(monitor["peaks"])
-        meter_var.set(min(100, int(level * 100)))
+            labels = list(monitor["labels"])
+        if not channels and level > 0:
+            channels = [level]
+            peaks = [peak]
+            labels = ["level"]
         level_var.set(f"{level:.2f}")
         peak_var.set(f"{peak:.2f}")
+        _render_meters(channels, peaks, labels)
         if monitor["hud_canvas"] is not None:
-            _update_hud(channels, peaks)
+            _update_hud(channels, peaks, labels)
         root.after(200, _update_meter)
 
     def _toggle_monitor() -> None:
-        if monitor["stream"] is not None:
-            try:
-                monitor["stream"].stop()
-                monitor["stream"].close()
-            except Exception:
-                pass
-            monitor["stream"] = None
+        logger.info("Monitor toggle")
+        if monitor["streams"]:
+            for stream in monitor["streams"]:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+            monitor["streams"] = []
             _set_status("Monitor stopped")
             return
 
         try:
             import sounddevice as sd
-            import numpy as np
         except Exception as exc:
             logger.exception("Monitor failed")
             _set_status(f"Monitor failed: {exc}")
             return
 
-        def _cb(indata, _frames, _time, status):
-            if status:
+        def _update_levels(start_idx: int, indata) -> None:
+            if indata is None:
                 return
             data = indata.astype("float32")
             rms = float((data**2).mean() ** 0.5)
@@ -209,53 +430,162 @@ def launch_gui() -> None:
                 (data**2).mean(axis=0) ** 0.5 if data.ndim == 2 else [rms]
             )
             with monitor["lock"]:
-                monitor["level"] = rms
-                monitor["peak"] = max(monitor["peak"], rms)
-                monitor["channels"] = list(channel_rms)
-                if not monitor["peaks"] or len(monitor["peaks"]) != len(channel_rms):
-                    monitor["peaks"] = [0.0] * len(channel_rms)
-                monitor["peaks"] = [
-                    max(p, c) for p, c in zip(monitor["peaks"], channel_rms)
-                ]
+                needed = start_idx + len(channel_rms)
+                if len(monitor["channels"]) < needed:
+                    extend_by = needed - len(monitor["channels"])
+                    monitor["channels"].extend([0.0] * extend_by)
+                    monitor["peaks"].extend([0.0] * extend_by)
+                for offset, value in enumerate(channel_rms):
+                    idx = start_idx + offset
+                    monitor["channels"][idx] = float(value)
+                    monitor["peaks"][idx] = max(monitor["peaks"][idx], float(value))
+                monitor["level"] = max(monitor["channels"], default=0.0)
+                monitor["peak"] = max(monitor["peaks"], default=0.0)
 
         mode = capture_mode_var.get()
-        monitor_device = (
-            system_device_var.get().strip()
-            if mode == "system"
-            else mic_device_var.get().strip()
-        )
-        requested_channels = (
-            int(system_channels_var.get())
-            if mode == "system"
-            else int(mic_channels_var.get())
-        )
-        extra_settings = None
         try:
-            dev_info = sd.query_devices(monitor_device or None, "input")
-            max_in = dev_info.get("max_input_channels", 0)
-            monitor_channels = min(requested_channels, max_in) if max_in else 1
-            if monitor_channels != requested_channels:
-                _set_status(
-                    f"Monitor channels adjusted to {monitor_channels} (max {max_in})"
+            _log_fields("monitor_start")
+            monitor["labels"] = _build_channel_map(mode)
+            if mode == "dual":
+                mic_device = mic_device_var.get().strip()
+                system_device = system_device_var.get().strip()
+                mic_requested = int(mic_channels_var.get())
+                sys_requested = int(system_channels_var.get())
+
+                try:
+                    mic_info = sd.query_devices(mic_device or None, "input")
+                except Exception:
+                    mic_info = sd.query_devices(None, "input")
+                    mic_device = ""
+                    _set_status("Mic device not found, using default.")
+                try:
+                    sys_info = sd.query_devices(system_device or None, "output")
+                except Exception:
+                    sys_info = sd.query_devices(None, "output")
+                    system_device = ""
+                    _set_status("System device not found, using default.")
+
+                mic_max = mic_info.get("max_input_channels", 0) or 1
+                sys_max = sys_info.get("max_output_channels", 0) or 1
+                mic_index = mic_info.get("index")
+                sys_index = sys_info.get("index")
+                mic_channels = min(mic_requested, mic_max)
+                sys_channels = min(sys_requested, sys_max)
+                if mic_channels != mic_requested or sys_channels != sys_requested:
+                    _set_status(
+                        "Monitor channels adjusted "
+                        f"(mic {mic_channels}/{mic_max}, sys {sys_channels}/{sys_max})"
+                    )
+                monitor["labels"] = (
+                    _build_channel_map("mic")[:mic_channels]
+                    + _build_channel_map("system")[:sys_channels]
                 )
-            if mode == "system" and hasattr(sd, "WasapiSettings"):
-                extra_settings = sd.WasapiSettings(loopback=True)
-            stream = sd.InputStream(
-                samplerate=int(rate_var.get()),
-                channels=monitor_channels,
-                dtype="int16",
-                device=monitor_device or None,
-                callback=_cb,
-                extra_settings=extra_settings,
-            )
-            stream.start()
-            monitor["stream"] = stream
+                with monitor["lock"]:
+                    monitor["channels"] = [0.0] * (mic_channels + sys_channels)
+                    monitor["peaks"] = [0.0] * (mic_channels + sys_channels)
+
+                def _cb_mic(indata, _frames, _time, status):
+                    if status:
+                        return
+                    _update_levels(0, indata)
+
+                def _cb_sys(indata, _frames, _time, status):
+                    if status:
+                        return
+                    _update_levels(mic_channels, indata)
+
+                sys_settings = None
+                if hasattr(sd, "WasapiSettings"):
+                    try:
+                        sys_settings = sd.WasapiSettings(loopback=True)
+                    except TypeError:
+                        sys_settings = None
+                mic_stream = sd.InputStream(
+                    samplerate=int(rate_var.get()),
+                    channels=mic_channels,
+                    dtype="int16",
+                    device=mic_index if mic_index is not None else mic_device or None,
+                    callback=_cb_mic,
+                )
+                sys_stream = sd.InputStream(
+                    samplerate=int(rate_var.get()),
+                    channels=sys_channels,
+                    dtype="int16",
+                    device=sys_index if sys_index is not None else system_device or None,
+                    callback=_cb_sys,
+                    extra_settings=sys_settings,
+                )
+                mic_stream.start()
+                sys_stream.start()
+                monitor["streams"] = [mic_stream, sys_stream]
+            else:
+                monitor_device = (
+                    system_device_var.get().strip()
+                    if mode == "system"
+                    else mic_device_var.get().strip()
+                )
+                requested_channels = (
+                    int(system_channels_var.get())
+                    if mode == "system"
+                    else int(mic_channels_var.get())
+                )
+                device_index = None
+                try:
+                    dev_info = sd.query_devices(
+                        monitor_device or None,
+                        "output" if mode == "system" else "input",
+                    )
+                    device_index = dev_info.get("index")
+                except Exception:
+                    dev_info = sd.query_devices(
+                        None, "output" if mode == "system" else "input"
+                    )
+                    device_index = dev_info.get("index")
+                    monitor_device = ""
+                    _set_status("Device not found, using default.")
+                max_in = (
+                    dev_info.get("max_output_channels", 0)
+                    if mode == "system"
+                    else dev_info.get("max_input_channels", 0)
+                )
+                monitor_channels = min(requested_channels, max_in) if max_in else 1
+                if monitor_channels != requested_channels:
+                    _set_status(
+                        f"Monitor channels adjusted to {monitor_channels} (max {max_in})"
+                    )
+                monitor["labels"] = _build_channel_map(mode)[:monitor_channels]
+                with monitor["lock"]:
+                    monitor["channels"] = [0.0] * monitor_channels
+                    monitor["peaks"] = [0.0] * monitor_channels
+
+                def _cb(indata, _frames, _time, status):
+                    if status:
+                        return
+                    _update_levels(0, indata)
+
+                extra_settings = None
+                if mode == "system" and hasattr(sd, "WasapiSettings"):
+                    try:
+                        extra_settings = sd.WasapiSettings(loopback=True)
+                    except TypeError:
+                        extra_settings = None
+                stream = sd.InputStream(
+                    samplerate=int(rate_var.get()),
+                    channels=monitor_channels,
+                    dtype="int16",
+                    device=device_index if device_index is not None else None,
+                    callback=_cb,
+                    extra_settings=extra_settings,
+                )
+                stream.start()
+                monitor["streams"] = [stream]
             _set_status("Monitoring levels...")
         except Exception as exc:
             logger.exception("Monitor failed")
             _set_status(f"Monitor failed: {exc}")
 
     def _open_hud() -> None:
+        logger.info("Open HUD")
         if monitor["hud"] is not None:
             return
         hud = tk.Toplevel(root)
@@ -268,18 +598,169 @@ def launch_gui() -> None:
         hud.protocol("WM_DELETE_WINDOW", _close_hud)
 
     def _close_hud() -> None:
+        logger.info("Close HUD")
         if monitor["hud"] is not None:
             monitor["hud"].destroy()
         monitor["hud"] = None
         monitor["hud_canvas"] = None
 
     def _reset_peaks() -> None:
+        logger.info("Reset peaks")
         with monitor["lock"]:
             monitor["peak"] = 0.0
             monitor["peaks"] = [0.0 for _ in monitor["peaks"]]
         _set_status("Peaks reset")
 
-    def _update_hud(levels: list[float], peaks: list[float]) -> None:
+    def _append_transcript(text: str) -> None:
+        transcript_box.configure(state="normal")
+        transcript_box.insert("end", text, "live")
+        transcript_box.see("end")
+        transcript_box.configure(state="disabled")
+
+    def _poll_transcript() -> None:
+        while True:
+            try:
+                item = live["text_queue"].get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(item, tuple) and item[0] == "replace":
+                _, text, tag = item
+                transcript_box.configure(state="normal")
+                transcript_box.delete("1.0", "end")
+                transcript_box.insert("end", text, tag)
+                transcript_box.configure(state="disabled")
+            else:
+                _append_transcript(str(item))
+        root.after(200, _poll_transcript)
+
+    def _poll_transcribe_progress() -> None:
+        while True:
+            try:
+                item = transcribe["progress_queue"].get_nowait()
+            except queue.Empty:
+                break
+            if item == "start":
+                progress_var.set(0)
+                progress_label_var.set("Final transcription 0%")
+            elif item == "done":
+                progress_var.set(100)
+                progress_label_var.set("Final transcription complete")
+            elif item == "diarize_start":
+                progress_var.set(0)
+                progress_label_var.set("Diarization 0%")
+            elif item == "diarize_done":
+                progress_var.set(100)
+                progress_label_var.set("Diarization complete")
+            elif isinstance(item, float):
+                pct = int(item * 100)
+                progress_var.set(pct)
+                label = (
+                    "Final transcription" if progress_label_var.get().startswith("Final")
+                    else "Diarization"
+                )
+                progress_label_var.set(f"{label} {pct}%")
+        root.after(200, _poll_transcribe_progress)
+
+    def _stop_live_transcriber() -> None:
+        live["stop_event"].set()
+        if live["audio_queue"] is not None:
+            try:
+                live["audio_queue"].put_nowait(None)
+            except Exception:
+                pass
+        live["audio_queue"] = None
+
+    def _start_live_transcriber(sample_rate_hz: int, channels: int) -> None:
+        if not live_transcribe_var.get():
+            return
+        live["stop_event"].clear()
+        live["audio_queue"] = queue.Queue(maxsize=50)
+        live["text_queue"].put("[Live transcription starting...]\n")
+
+        def _worker() -> None:
+            try:
+                import numpy as np
+                from faster_whisper import WhisperModel
+            except Exception as exc:
+                live["text_queue"].put(f"\n[Live transcription unavailable: {exc}]\n")
+                return
+
+            model_name = live_model_var.get().strip() or "tiny"
+            kwargs = {}
+            if device_pref_var.get().strip():
+                kwargs["device"] = device_pref_var.get().strip()
+            if compute_type_var.get().strip():
+                kwargs["compute_type"] = compute_type_var.get().strip()
+            model = WhisperModel(model_name, **kwargs)
+
+            chunk_seconds = 4
+            overlap_seconds = 0.5
+            chunk_samples = int(sample_rate_hz * chunk_seconds)
+            overlap_samples = int(sample_rate_hz * overlap_seconds)
+            buffer = np.zeros((0, channels), dtype=np.float32)
+            language = language_var.get().strip() or None
+
+            while True:
+                try:
+                    item = live["audio_queue"].get(timeout=0.25)
+                except queue.Empty:
+                    if live["stop_event"].is_set():
+                        break
+                    continue
+                if item is None:
+                    if live["stop_event"].is_set():
+                        break
+                    continue
+
+                chunk = item
+                if chunk.ndim == 1:
+                    chunk = chunk.reshape(-1, 1)
+                if chunk.dtype != np.float32:
+                    chunk = chunk.astype(np.float32) / 32768.0
+                buffer = np.concatenate([buffer, chunk], axis=0)
+
+                while buffer.shape[0] >= chunk_samples:
+                    segment = buffer[:chunk_samples]
+                    if overlap_samples > 0:
+                        buffer = buffer[chunk_samples - overlap_samples :]
+                    else:
+                        buffer = buffer[chunk_samples:]
+                    if segment.shape[1] > 1:
+                        audio_mono = segment.mean(axis=1)
+                    else:
+                        audio_mono = segment[:, 0]
+                    try:
+                        segments, _info = model.transcribe(
+                            audio_mono, language=language
+                        )
+                    except Exception as exc:
+                        live["text_queue"].put(
+                            f"\n[Live transcription error: {exc}]\n"
+                        )
+                        continue
+                    text = " ".join(s.text.strip() for s in segments).strip()
+                    if text:
+                        live["text_queue"].put(text + " ")
+
+            if buffer.shape[0] > 0:
+                if buffer.shape[1] > 1:
+                    audio_mono = buffer.mean(axis=1)
+                else:
+                    audio_mono = buffer[:, 0]
+                try:
+                    segments, _info = model.transcribe(audio_mono, language=language)
+                except Exception:
+                    return
+                text = " ".join(s.text.strip() for s in segments).strip()
+                if text:
+                    live["text_queue"].put(text + " ")
+
+        live["thread"] = threading.Thread(target=_worker, daemon=True)
+        live["thread"].start()
+
+    def _update_hud(
+        levels: list[float], peaks: list[float], labels: list[str]
+    ) -> None:
         canvas = monitor["hud_canvas"]
         if canvas is None:
             return
@@ -305,14 +786,75 @@ def launch_gui() -> None:
                 canvas.create_line(
                     x0, 10 + (max_h - ph), x1, 10 + (max_h - ph), fill="red"
                 )
+            label = labels[idx] if idx < len(labels) else f"ch{idx+1}"
             canvas.create_text(
-                x0 + bar_w / 2, 10 + max_h + 12, text=f"ch{idx+1}", fill="white"
+                x0 + bar_w / 2, 10 + max_h + 12, text=label, fill="white"
+            )
+
+    def _render_meters(
+        levels: list[float], peaks: list[float], labels: list[str]
+    ) -> None:
+        if meter_canvas is None:
+            return
+        canvas = meter_canvas
+        canvas.delete("all")
+        if not levels:
+            canvas.create_text(
+                10,
+                10,
+                anchor="nw",
+                text="No active levels. Use Monitor or Start to see meters.",
+                fill="#6aa6ff",
+            )
+            return
+        width = int(canvas.winfo_width() or 520)
+        height = int(canvas.winfo_height() or 120)
+        left_margin = 10
+        top_margin = 10
+        max_h = max(30, height - 30)
+        count = len(levels)
+        gap = 6
+        usable = max(10, width - left_margin * 2 - gap * (count - 1))
+        bar_w = max(10, int(usable / max(1, count)))
+        for idx, level in enumerate(levels):
+            x0 = left_margin + idx * (bar_w + gap)
+            x1 = x0 + bar_w
+            h = min(max_h, int(level * max_h))
+            if level < 0.6:
+                color = "#32ff7e"
+            elif level < 0.85:
+                color = "#ff9f43"
+            else:
+                color = "#ff4d6d"
+            canvas.create_rectangle(
+                x0, top_margin + (max_h - h), x1, top_margin + max_h, fill=color
+            )
+            if idx < len(peaks):
+                ph = min(max_h, int(peaks[idx] * max_h))
+                canvas.create_line(
+                    x0,
+                    top_margin + (max_h - ph),
+                    x1,
+                    top_margin + (max_h - ph),
+                fill="#ff5bd1",
+            )
+            label = labels[idx] if idx < len(labels) else f"ch{idx+1}"
+            canvas.create_text(
+                x0 + bar_w / 2,
+                top_margin + max_h + 10,
+                text=label,
+                fill="#8bd3ff",
             )
 
     def _build_channel_map(mode: str) -> list[str]:
         mic_count = int(mic_channels_var.get())
         sys_count = int(system_channels_var.get())
-        mic_labels = ["front_left", "front_right", "rear_left", "rear_right"][:mic_count]
+        if mic_count <= 2:
+            mic_labels = ["left", "right"][:mic_count]
+        else:
+            mic_labels = ["front_left", "front_right", "rear_left", "rear_right"][
+                :mic_count
+            ]
         sys_labels = ["system_left", "system_right", "system_rl", "system_rr"][
             :sys_count
         ]
@@ -322,14 +864,34 @@ def launch_gui() -> None:
             return sys_labels
         return mic_labels
 
+    def _format_segments(segments: list) -> str:
+        lines = []
+        for seg in segments:
+            label = f"{seg.speaker}: " if getattr(seg, "speaker", None) else ""
+            lines.append(f"{label}{seg.text.strip()}")
+        return "\n".join(lines) + ("\n" if lines else "")
+
     def _start_recording(context_type: str) -> None:
         if state["recording"]:
             return
+        logger.info("Start recording requested (%s)", context_type)
         state["recording"] = True
         state["start_time"] = time.time()
         state["stop_event"].clear()
         timer_var.set("00:00")
         _set_status(f"Recording ({context_type})...")
+        _save_last_used()
+        if not monitor["streams"]:
+            _toggle_monitor()
+        transcript_box.configure(state="normal")
+        transcript_box.delete("1.0", "end")
+        transcript_box.configure(state="disabled")
+        while True:
+            try:
+                live["text_queue"].get_nowait()
+            except queue.Empty:
+                break
+        _log_fields("recording_start")
 
         title = title_var.get().strip() or context_type
         paths = get_output_dirs(
@@ -344,6 +906,27 @@ def launch_gui() -> None:
 
         def _worker() -> None:
             mode = capture_mode_var.get()
+            try:
+                mic_count = int(mic_channels_var.get())
+            except ValueError:
+                mic_count = 1
+            try:
+                system_count = int(system_channels_var.get())
+            except ValueError:
+                system_count = 1
+            _start_live_transcriber(
+                sample_rate_hz=int(rate_var.get()),
+                channels=mic_count if mode != "system" else system_count,
+            )
+
+            def _enqueue_audio(chunk) -> None:
+                if live["audio_queue"] is None:
+                    return
+                try:
+                    live["audio_queue"].put_nowait(chunk)
+                except queue.Full:
+                    pass
+
             if mode == "dual":
                 record_result = record_audio_stream_dual(
                     output_path=output_path,
@@ -353,6 +936,7 @@ def launch_gui() -> None:
                     mic_device_name=mic_device_var.get().strip() or None,
                     system_device_name=system_device_var.get().strip() or None,
                     stop_event=state["stop_event"],
+                    on_chunk=_enqueue_audio,
                 )
             else:
                 record_result = record_audio_stream(
@@ -367,11 +951,14 @@ def launch_gui() -> None:
                     else mic_device_var.get().strip() or None,
                     stop_event=state["stop_event"],
                     loopback=mode == "system",
+                    on_chunk=_enqueue_audio,
                 )
 
             state["recording"] = False
             state["start_time"] = None
+            _stop_live_transcriber()
             _set_status("Transcribing...")
+            transcribe["progress_queue"].put("start")
 
             transcribe_path = output_path
             if mode == "dual":
@@ -385,6 +972,25 @@ def launch_gui() -> None:
                     output_path, mic_only_path, list(range(0, mic_count))
                 )
                 transcribe_path = mic_only_path
+            elif mode == "mic":
+                mic_count = int(mic_channels_var.get())
+                if mic_count > 2:
+                    segments_dir = paths["segments"]
+                    ensure_dir(segments_dir)
+                    front_path = os.path.join(
+                        segments_dir, f"{basename}.front.wav"
+                    )
+                    extract_channels(output_path, front_path, [0, 1])
+                    transcribe_path = front_path
+
+            total_duration_s = (
+                record_result.duration_seconds
+                if record_result and record_result.duration_seconds
+                else None
+            )
+
+            def _progress_cb(ratio: float) -> None:
+                transcribe["progress_queue"].put(ratio)
 
             segments = transcribe_audio(
                 transcribe_path,
@@ -392,10 +998,18 @@ def launch_gui() -> None:
                 language=language_var.get().strip() or None,
                 device=device_pref_var.get().strip() or None,
                 compute_type=compute_type_var.get().strip() or None,
+                progress_cb=_progress_cb,
+                total_duration_s=total_duration_s,
             )
+            transcribe["progress_queue"].put("done")
+            final_text = _format_segments(segments)
+            if final_text:
+                live["text_queue"].put("\n[Final transcription ready]\n")
+                live["text_queue"].put(("replace", final_text, "final"))
 
             if diarize_var.get():
                 _set_status("Diarizing...")
+                transcribe["progress_queue"].put("diarize_start")
                 try:
                     speaker_map = {}
                     for pair in speaker_map_var.get().split(","):
@@ -408,6 +1022,10 @@ def launch_gui() -> None:
                         speaker_map=speaker_map or None,
                         hf_token=hf_token_var.get().strip() or None,
                     )
+                    diarized_text = _format_segments(segments)
+                    if diarized_text:
+                        live["text_queue"].put(("replace", diarized_text, "diarized"))
+                    transcribe["progress_queue"].put("diarize_done")
                 except Exception as exc:
                     logger.exception("Diarization failed")
                     _set_status(f"Diarization failed: {exc}")
@@ -502,17 +1120,20 @@ def launch_gui() -> None:
     def _stop_recording() -> None:
         if not state["recording"]:
             return
+        logger.info("Stop recording requested")
         state["stop_event"].set()
+        _stop_live_transcriber()
+        _save_last_used()
         _set_status("Stopping...")
 
     def _start_custom() -> None:
         context_type = context_type_var.get().strip() or "Session"
         _start_recording(context_type)
 
-    def _apply_profile(_event=None) -> None:
-        name = profile_var.get().strip()
+    def _apply_profile_by_name(name: str) -> None:
         if not name:
             return
+        logger.info("Apply profile: %s", name)
         match = next(
             (p for p in presets["profiles"] if p.get("name") == name), None
         )
@@ -526,12 +1147,30 @@ def launch_gui() -> None:
             org_var.set(match.get("organization"))
         if match.get("tags"):
             tags_var.set(", ".join(match.get("tags", [])))
+        _log_fields("apply_profile")
+
+    def _apply_profile(_event=None) -> None:
+        _apply_profile_by_name(profile_var.get().strip())
+
+    def _apply_context_type(label: str) -> None:
+        context_type_var.set(label)
+        profile_var.set("")
+        _apply_profile_by_name(label)
+        if not title_var.get().strip():
+            title_var.set(label)
+        if auto_tags_var.get():
+            tags = [t.strip() for t in tags_var.get().split(",") if t.strip()]
+            if label and label not in tags:
+                tags.append(label)
+                tags_var.set(", ".join(tags))
+        _log_fields("apply_context_type")
 
     def _save_profile() -> None:
         name = profile_name_var.get().strip()
         if not name:
             _set_status("Profile name required")
             return
+        logger.info("Save profile: %s", name)
         profile = {
             "name": name,
             "context_type": context_type_var.get().strip(),
@@ -544,10 +1183,13 @@ def launch_gui() -> None:
         presets["profiles"].append(profile)
         profile_combo["values"] = [p.get("name") for p in presets["profiles"]]
         profile_var.set(name)
+        _log_fields("save_profile")
         _set_status("Profile saved")
 
     def _clear_fields() -> None:
+        logger.info("Clear fields")
         title_var.set("")
+        user_name_var.set(config.context.get("user_name", ""))
         attendees_var.set("")
         contact_var.set("")
         contact_id_var.set("")
@@ -564,16 +1206,22 @@ def launch_gui() -> None:
         )
         profile_var.set("")
         profile_name_var.set("")
+        _log_fields("clear_fields")
         _set_status("Cleared")
 
     menubar = tk.Menu(root)
+    settings_menu = tk.Menu(menubar, tearoff=0)
+    view_menu = tk.Menu(menubar, tearoff=0)
     help_menu = tk.Menu(menubar, tearoff=0)
     dev_menu = tk.Menu(help_menu, tearoff=0)
     root.config(menu=menubar)
+    menubar.add_cascade(label="Settings", menu=settings_menu)
+    menubar.add_cascade(label="View", menu=view_menu)
     menubar.add_cascade(label="Help", menu=help_menu)
     help_menu.add_cascade(label="Developer", menu=dev_menu)
 
     def _open_log_viewer() -> None:
+        logger.info("Open log viewer")
         win = tk.Toplevel(root)
         win.title("EchoFrame Log")
         win.resizable(True, True)
@@ -602,6 +1250,7 @@ def launch_gui() -> None:
         _refresh()
 
     def _open_log_folder() -> None:
+        logger.info("Open log folder")
         log_dir = os.path.dirname(log_path)
         try:
             os.startfile(log_dir)  # type: ignore[attr-defined]
@@ -609,6 +1258,7 @@ def launch_gui() -> None:
             _set_status(f"Open log folder failed: {exc}")
 
     def _enable_debug() -> None:
+        logger.info("Enable debug logging")
         logger.setLevel(logging.DEBUG)
         debug_enabled_var.set(True)
         config.context["debug_logging"] = True
@@ -617,6 +1267,7 @@ def launch_gui() -> None:
         _set_status("Debug logging enabled")
 
     def _toggle_debug() -> None:
+        logger.info("Toggle debug logging")
         enabled = not debug_enabled_var.get()
         debug_enabled_var.set(enabled)
         logger.setLevel(logging.DEBUG if enabled else logging.INFO)
@@ -630,283 +1281,917 @@ def launch_gui() -> None:
     dev_menu.add_command(label="Enable Debug Logging", command=_enable_debug)
     dev_menu.add_command(label="Toggle Debug Logging", command=_toggle_debug)
 
+    def _open_audio_settings() -> None:
+        logger.info("Open audio settings")
+        win = tk.Toplevel(root)
+        win.title("Audio settings")
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=8)
+        frame.grid(row=0, column=0, sticky="nsew")
+
+        device_choices = []
+        system_choices = []
+        all_devices = []
+        hostapis = []
+        try:
+            devices = list_input_devices(loopback=False)
+            device_choices = [d.get("name") for d in devices if d.get("name")]
+        except Exception as exc:
+            logger.debug("Device list failed: %s", exc)
+        try:
+            outputs = list_input_devices(loopback=True)
+            system_choices = [d.get("name") for d in outputs if d.get("name")]
+        except Exception as exc:
+            logger.debug("System device list failed: %s", exc)
+        try:
+            import sounddevice as sd
+
+            all_devices = sd.query_devices()
+            hostapis = sd.query_hostapis()
+        except Exception as exc:
+            logger.debug("sounddevice details unavailable: %s", exc)
+
+        ttk.Label(frame, text="Capture mode").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(
+            frame,
+            textvariable=capture_mode_var,
+            values=["mic", "system", "dual"],
+            width=12,
+            state="readonly",
+        ).grid(row=0, column=1, sticky="w")
+        _ToolTip(frame.winfo_children()[-1], "Capture source: mic, system, or both.")
+        ttk.Label(
+            frame,
+            text="System uses WASAPI loopback. Dual records mic + system together.",
+            foreground="#6aa6ff",
+        ).grid(row=0, column=2, sticky="w")
+
+        ttk.Label(frame, text="Mic device").grid(row=1, column=0, sticky="w")
+        mic_device_combo = ttk.Combobox(
+            frame, textvariable=mic_device_var, values=device_choices, width=60
+        )
+        mic_device_combo.grid(
+            row=1, column=1, sticky="w"
+        )
+        _ToolTip(mic_device_combo, "Select mic input device (Zoom, headset, etc.).")
+
+        ttk.Label(frame, text="System device").grid(row=2, column=0, sticky="w")
+        system_device_combo = ttk.Combobox(
+            frame, textvariable=system_device_var, values=system_choices, width=60
+        )
+        system_device_combo.grid(
+            row=2, column=1, sticky="w"
+        )
+        _ToolTip(system_device_combo, "Select output device for loopback capture.")
+
+        details_frame = ttk.LabelFrame(
+            frame, text="Selected device details", style="Neo.TLabelframe"
+        )
+        details_frame.grid(row=1, column=2, rowspan=6, sticky="n", padx=(8, 0))
+        details_box = tk.Text(details_frame, width=48, height=10, wrap="word")
+        details_box.grid(row=0, column=0, padx=6, pady=6)
+        details_box.configure(state="disabled")
+
+        ttk.Label(frame, text="Sample rate").grid(row=3, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=rate_var, width=12).grid(
+            row=3, column=1, sticky="w"
+        )
+        _ToolTip(frame.winfo_children()[-1], "Sample rate in Hz (44100 or 48000).")
+
+        ttk.Label(frame, text="Mic channels").grid(row=4, column=0, sticky="w")
+        mic_channels_combo = ttk.Combobox(
+            frame, textvariable=mic_channels_var, values=["1", "2", "4"], width=6
+        )
+        mic_channels_combo.grid(row=4, column=1, sticky="w")
+        _ToolTip(mic_channels_combo, "Mic channel count (device limit applies).")
+
+        ttk.Label(frame, text="System channels").grid(row=5, column=0, sticky="w")
+        ttk.Combobox(
+            frame, textvariable=system_channels_var, values=["1", "2", "4"], width=6
+        ).grid(row=5, column=1, sticky="w")
+        _ToolTip(frame.winfo_children()[-1], "Loopback channel count.")
+
+        def _find_device_by_name(name: str) -> dict | None:
+            if not name:
+                return None
+            exact = next((d for d in all_devices if d.get("name") == name), None)
+            if exact:
+                return exact
+            name_lower = name.lower()
+            return next(
+                (d for d in all_devices if name_lower in d.get("name", "").lower()),
+                None,
+            )
+
+        def _format_device_info(label: str, name: str) -> list[str]:
+            info = _find_device_by_name(name)
+            if not info:
+                return [f"{label}: (not set)"]
+            hostapi_name = ""
+            host_idx = info.get("hostapi")
+            if host_idx is not None and host_idx < len(hostapis):
+                hostapi_name = hostapis[host_idx].get("name", "")
+            lines = [
+                f"{label}: {info.get('name', '')}",
+                f"Index: {info.get('index', '')}",
+                f"Host API: {hostapi_name}",
+                f"Max input channels: {info.get('max_input_channels', 0)}",
+                f"Max output channels: {info.get('max_output_channels', 0)}",
+                f"Default sample rate: {info.get('default_samplerate', '')}",
+                f"Default low input latency: {info.get('default_low_input_latency', '')}",
+                f"Default high input latency: {info.get('default_high_input_latency', '')}",
+                f"Default low output latency: {info.get('default_low_output_latency', '')}",
+                f"Default high output latency: {info.get('default_high_output_latency', '')}",
+                "HWID: unavailable via sounddevice",
+            ]
+            return lines
+
+        def _update_device_details() -> None:
+            mic_lines = _format_device_info("Mic", mic_device_var.get().strip())
+            sys_lines = _format_device_info("System", system_device_var.get().strip())
+            details_box.configure(state="normal")
+            details_box.delete("1.0", "end")
+            details_box.insert("end", "\n".join(mic_lines + [""] + sys_lines))
+            details_box.configure(state="disabled")
+
+        def _refresh_devices() -> None:
+            try:
+                refreshed = list_input_devices(loopback=False)
+            except Exception as exc:
+                _set_status(f"Device list failed: {exc}")
+                return
+            choices = [d.get("name") for d in refreshed if d.get("name")]
+            mic_device_combo["values"] = choices
+            try:
+                refreshed_out = list_input_devices(loopback=True)
+                out_choices = [d.get("name") for d in refreshed_out if d.get("name")]
+                system_device_combo["values"] = out_choices
+            except Exception as exc:
+                _set_status(f"System device list failed: {exc}")
+            _update_device_details()
+            _set_status("Device list refreshed")
+
+        def _apply_mic_device(_event=None) -> None:
+            name = mic_device_var.get().strip()
+            if not name:
+                return
+            try:
+                devices = list_input_devices(loopback=False)
+            except Exception:
+                return
+            match = next((d for d in devices if d.get("name") == name), None)
+            max_in = match.get("max_input_channels", 0) if match else 0
+            if max_in:
+                mic_channels_combo["values"] = [str(c) for c in (1, 2, 4) if c <= max_in]
+                if int(mic_channels_var.get() or "1") > max_in:
+                    mic_channels_var.set(str(max_in))
+                _set_status(f"Mic channels max {max_in}")
+
+        mic_device_combo.bind("<<ComboboxSelected>>", _apply_mic_device)
+        mic_device_combo.bind("<<ComboboxSelected>>", lambda _e: _update_device_details())
+        system_device_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: _update_device_details()
+        )
+        _update_device_details()
+
+        ttk.Button(frame, text="Refresh devices", command=_refresh_devices).grid(
+            row=6, column=0, sticky="w", pady=(6, 0)
+        )
+        ttk.Button(frame, text="Close", command=win.destroy).grid(
+            row=6, column=1, sticky="e", pady=(6, 0)
+        )
+
+    def _open_transcription_settings() -> None:
+        logger.info("Open transcription settings")
+        win = tk.Toplevel(root)
+        win.title("Transcription settings")
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=8)
+        frame.grid(row=0, column=0, sticky="nsew")
+
+        ttk.Label(frame, text="Final model").grid(row=0, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=model_var, width=12).grid(
+            row=0, column=1, sticky="w"
+        )
+        _ToolTip(frame.winfo_children()[-1], "Whisper model for final transcript.")
+        ttk.Label(frame, text="Live model").grid(row=0, column=2, sticky="w")
+        ttk.Entry(frame, textvariable=live_model_var, width=12).grid(
+            row=0, column=3, sticky="w"
+        )
+        _ToolTip(frame.winfo_children()[-1], "Smaller model for live preview.")
+
+        ttk.Label(frame, text="Language").grid(row=1, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=language_var, width=12).grid(
+            row=1, column=1, sticky="w"
+        )
+        _ToolTip(frame.winfo_children()[-1], "Optional language code (e.g., en).")
+
+        ttk.Label(frame, text="Device pref").grid(row=2, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=device_pref_var, width=12).grid(
+            row=2, column=1, sticky="w"
+        )
+        _ToolTip(frame.winfo_children()[-1], "Compute device preference (cpu/cuda).")
+
+        ttk.Label(frame, text="Compute type").grid(row=3, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=compute_type_var, width=12).grid(
+            row=3, column=1, sticky="w"
+        )
+        _ToolTip(frame.winfo_children()[-1], "Compute precision (int8/float16).")
+
+        ttk.Checkbutton(frame, text="Live transcription", variable=live_transcribe_var).grid(
+            row=4, column=0, columnspan=2, sticky="w"
+        )
+        _ToolTip(frame.winfo_children()[-1], "Enable the live preview panel.")
+        ttk.Checkbutton(frame, text="Diarize", variable=diarize_var).grid(
+            row=5, column=0, columnspan=2, sticky="w"
+        )
+        _ToolTip(frame.winfo_children()[-1], "Run speaker diarization after transcription.")
+
+        ttk.Label(frame, text="HF token").grid(row=6, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=hf_token_var, width=32, show="*").grid(
+            row=6, column=1, sticky="w"
+        )
+        _ToolTip(frame.winfo_children()[-1], "HuggingFace token for diarization models.")
+
+        ttk.Label(frame, text="Speaker map").grid(row=7, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=speaker_map_var, width=32).grid(
+            row=7, column=1, sticky="w"
+        )
+        _ToolTip(frame.winfo_children()[-1], "Map speaker IDs (Speaker_0:Name).")
+
+        ttk.Button(frame, text="Close", command=win.destroy).grid(
+            row=8, column=1, sticky="e", pady=(6, 0)
+        )
+
+    def _open_output_settings() -> None:
+        logger.info("Open output settings")
+        win = tk.Toplevel(root)
+        win.title("Output settings")
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=8)
+        frame.grid(row=0, column=0, sticky="nsew")
+
+        ttk.Checkbutton(
+            frame, text="Type folders", variable=use_type_folders_var
+        ).grid(row=0, column=0, sticky="w")
+
+        ttk.Button(frame, text="Close", command=win.destroy).grid(
+            row=1, column=0, sticky="e", pady=(6, 0)
+        )
+
+    def _open_my_profile() -> None:
+        logger.info("Open my profile")
+        win = tk.Toplevel(root)
+        win.title("My profile")
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=8)
+        frame.grid(row=0, column=0, sticky="nsew")
+
+        my_name_var = tk.StringVar(value=my_profile.get("user_name", user_name_var.get()))
+        my_org_var = tk.StringVar(value=my_profile.get("org", org_var.get()))
+        my_project_var = tk.StringVar(value=my_profile.get("project", project_var.get()))
+        my_channel_var = tk.StringVar(value=my_profile.get("channel", channel_var.get()))
+        my_tags_var = tk.StringVar(value=my_profile.get("tags", tags_var.get()))
+        my_location_var = tk.StringVar(value=my_profile.get("location", location_var.get()))
+        my_language_var = tk.StringVar(value=my_profile.get("language", language_var.get()))
+        my_context_var = tk.StringVar(
+            value=my_profile.get("default_context_type", context_type_var.get())
+        )
+
+        ttk.Label(frame, text="Your name").grid(row=0, column=0, sticky="w")
+        name_entry = ttk.Entry(frame, textvariable=my_name_var, width=30)
+        name_entry.grid(row=0, column=1, sticky="w")
+        _ToolTip(name_entry, "Default name used on launch.")
+
+        ttk.Label(frame, text="Org").grid(row=1, column=0, sticky="w")
+        org_entry = ttk.Entry(frame, textvariable=my_org_var, width=30)
+        org_entry.grid(row=1, column=1, sticky="w")
+        _ToolTip(org_entry, "Default organization on launch.")
+
+        ttk.Label(frame, text="Project").grid(row=2, column=0, sticky="w")
+        project_entry = ttk.Entry(frame, textvariable=my_project_var, width=30)
+        project_entry.grid(row=2, column=1, sticky="w")
+        _ToolTip(project_entry, "Default project on launch.")
+
+        ttk.Label(frame, text="Channel").grid(row=3, column=0, sticky="w")
+        channel_entry = ttk.Entry(frame, textvariable=my_channel_var, width=30)
+        channel_entry.grid(row=3, column=1, sticky="w")
+        _ToolTip(channel_entry, "Default channel on launch.")
+
+        ttk.Label(frame, text="Tags").grid(row=4, column=0, sticky="w")
+        tags_entry = ttk.Entry(frame, textvariable=my_tags_var, width=30)
+        tags_entry.grid(row=4, column=1, sticky="w")
+        _ToolTip(tags_entry, "Default tags on launch.")
+
+        ttk.Label(frame, text="Location").grid(row=5, column=0, sticky="w")
+        location_entry = ttk.Entry(frame, textvariable=my_location_var, width=30)
+        location_entry.grid(row=5, column=1, sticky="w")
+        _ToolTip(location_entry, "Default location on launch.")
+
+        ttk.Label(frame, text="Language").grid(row=6, column=0, sticky="w")
+        language_entry = ttk.Entry(frame, textvariable=my_language_var, width=30)
+        language_entry.grid(row=6, column=1, sticky="w")
+        _ToolTip(language_entry, "Default language for transcription.")
+
+        ttk.Label(frame, text="Default type").grid(row=7, column=0, sticky="w")
+        type_entry = ttk.Entry(frame, textvariable=my_context_var, width=30)
+        type_entry.grid(row=7, column=1, sticky="w")
+        _ToolTip(type_entry, "Default context type on launch.")
+
+        def _save_my_profile() -> None:
+            my_profile.clear()
+            my_profile.update(
+                {
+                    "user_name": my_name_var.get().strip(),
+                    "org": my_org_var.get().strip(),
+                    "project": my_project_var.get().strip(),
+                    "channel": my_channel_var.get().strip(),
+                    "tags": my_tags_var.get().strip(),
+                    "location": my_location_var.get().strip(),
+                    "language": my_language_var.get().strip(),
+                    "default_context_type": my_context_var.get().strip(),
+                }
+            )
+            config.context["my_profile"] = dict(my_profile)
+            save_config(config_path, config)
+            _apply_my_profile(my_profile)
+            _set_status("My profile saved")
+            win.destroy()
+
+        ttk.Button(frame, text="Save and Close", command=_save_my_profile).grid(
+            row=8, column=0, sticky="w", pady=(6, 0)
+        )
+        ttk.Button(frame, text="Cancel", command=win.destroy).grid(
+            row=8, column=1, sticky="e", pady=(6, 0)
+        )
+
+    def _open_manage_lists() -> None:
+        logger.info("Open manage lists")
+        win = tk.Toplevel(root)
+        win.title("Manage lists")
+        win.resizable(True, True)
+        frame = ttk.Frame(win, padding=8)
+        frame.grid(row=0, column=0, sticky="nsew")
+        notebook = ttk.Notebook(frame)
+        notebook.grid(row=0, column=0, sticky="nsew")
+
+        def _build_list_tab(label: str, items: list[str]) -> ttk.Frame:
+            tab = ttk.Frame(notebook)
+            list_var = tk.StringVar(value=items)
+            listbox = tk.Listbox(tab, listvariable=list_var, height=8, width=30)
+            listbox.grid(row=0, column=0, rowspan=4, padx=(0, 6), sticky="ns")
+
+            entry_var = tk.StringVar()
+            entry = ttk.Entry(tab, textvariable=entry_var, width=26)
+            entry.grid(row=0, column=1, sticky="w")
+
+            def _refresh():
+                list_var.set(items)
+
+            def _add():
+                value = entry_var.get().strip()
+                if value and value not in items:
+                    items.append(value)
+                    _refresh()
+
+            def _edit():
+                sel = listbox.curselection()
+                if not sel:
+                    return
+                idx = sel[0]
+                value = entry_var.get().strip()
+                if value:
+                    items[idx] = value
+                    _refresh()
+
+            def _delete():
+                sel = listbox.curselection()
+                if not sel:
+                    return
+                idx = sel[0]
+                items.pop(idx)
+                _refresh()
+
+            ttk.Button(tab, text="Add", command=_add).grid(row=1, column=1, sticky="w")
+            ttk.Button(tab, text="Edit", command=_edit).grid(row=2, column=1, sticky="w")
+            ttk.Button(tab, text="Delete", command=_delete).grid(row=3, column=1, sticky="w")
+            return tab
+
+        notebook.add(_build_list_tab("Organizations", presets["organizations"]), text="Organizations")
+        notebook.add(_build_list_tab("Projects", presets["projects"]), text="Projects")
+        notebook.add(_build_list_tab("Channels", presets["channels"]), text="Channels")
+        notebook.add(_build_list_tab("Context Types", presets["context_types"]), text="Context Types")
+        notebook.add(_build_list_tab("Tags", presets["tags"]), text="Tags")
+
+        profiles_tab = ttk.Frame(notebook)
+        notebook.add(profiles_tab, text="Profiles")
+        profile_names = [p.get("name", "") for p in presets["profiles"]]
+        profile_var_list = tk.StringVar(value=profile_names)
+        profile_listbox = tk.Listbox(
+            profiles_tab, listvariable=profile_var_list, height=8, width=30
+        )
+        profile_listbox.grid(row=0, column=0, rowspan=4, padx=(0, 6), sticky="ns")
+
+        def _refresh_profiles():
+            profile_var_list.set([p.get("name", "") for p in presets["profiles"]])
+            profile_combo["values"] = [p.get("name") for p in presets["profiles"]]
+
+        def _profile_dialog(existing: dict | None = None) -> None:
+            win_p = tk.Toplevel(win)
+            win_p.title("Profile")
+            win_p.resizable(False, False)
+            f = ttk.Frame(win_p, padding=8)
+            f.grid(row=0, column=0, sticky="nsew")
+
+            name_var = tk.StringVar(value=existing.get("name", "") if existing else "")
+            ctx_var = tk.StringVar(value=existing.get("context_type", "") if existing else "")
+            chan_var = tk.StringVar(value=existing.get("channel", "") if existing else "")
+            org_var_p = tk.StringVar(value=existing.get("organization", "") if existing else "")
+            proj_var = tk.StringVar(value=existing.get("project", "") if existing else "")
+            tags_var_p = tk.StringVar(
+                value=", ".join(existing.get("tags", [])) if existing else ""
+            )
+
+            ttk.Label(f, text="Name").grid(row=0, column=0, sticky="w")
+            ttk.Entry(f, textvariable=name_var, width=24).grid(row=0, column=1, sticky="w")
+            ttk.Label(f, text="Context").grid(row=1, column=0, sticky="w")
+            ttk.Entry(f, textvariable=ctx_var, width=24).grid(row=1, column=1, sticky="w")
+            ttk.Label(f, text="Channel").grid(row=2, column=0, sticky="w")
+            ttk.Entry(f, textvariable=chan_var, width=24).grid(row=2, column=1, sticky="w")
+            ttk.Label(f, text="Org").grid(row=3, column=0, sticky="w")
+            ttk.Entry(f, textvariable=org_var_p, width=24).grid(row=3, column=1, sticky="w")
+            ttk.Label(f, text="Project").grid(row=4, column=0, sticky="w")
+            ttk.Entry(f, textvariable=proj_var, width=24).grid(row=4, column=1, sticky="w")
+            ttk.Label(f, text="Tags").grid(row=5, column=0, sticky="w")
+            ttk.Entry(f, textvariable=tags_var_p, width=24).grid(row=5, column=1, sticky="w")
+
+            def _save_profile_edit() -> None:
+                name = name_var.get().strip()
+                if not name:
+                    return
+                profile = {
+                    "name": name,
+                    "context_type": ctx_var.get().strip(),
+                    "channel": chan_var.get().strip(),
+                    "organization": org_var_p.get().strip() or None,
+                    "project": proj_var.get().strip() or None,
+                    "tags": [t.strip() for t in tags_var_p.get().split(",") if t.strip()],
+                }
+                presets["profiles"] = [p for p in presets["profiles"] if p.get("name") != name]
+                presets["profiles"].append(profile)
+                _refresh_profiles()
+                win_p.destroy()
+
+            ttk.Button(f, text="Save", command=_save_profile_edit).grid(
+                row=6, column=0, sticky="w", pady=(6, 0)
+            )
+            ttk.Button(f, text="Cancel", command=win_p.destroy).grid(
+                row=6, column=1, sticky="e", pady=(6, 0)
+            )
+
+        def _add_profile():
+            _profile_dialog()
+
+        def _edit_profile():
+            sel = profile_listbox.curselection()
+            if not sel:
+                return
+            name = profile_listbox.get(sel[0])
+            existing = next((p for p in presets["profiles"] if p.get("name") == name), None)
+            if existing:
+                _profile_dialog(existing)
+
+        def _delete_profile():
+            sel = profile_listbox.curselection()
+            if not sel:
+                return
+            name = profile_listbox.get(sel[0])
+            presets["profiles"] = [p for p in presets["profiles"] if p.get("name") != name]
+            _refresh_profiles()
+
+        ttk.Button(profiles_tab, text="Add", command=_add_profile).grid(
+            row=1, column=1, sticky="w"
+        )
+        ttk.Button(profiles_tab, text="Edit", command=_edit_profile).grid(
+            row=2, column=1, sticky="w"
+        )
+        ttk.Button(profiles_tab, text="Delete", command=_delete_profile).grid(
+            row=3, column=1, sticky="w"
+        )
+
+        def _save_lists() -> None:
+            config.context["context_types"] = presets["context_types"]
+            config.context["channels"] = presets["channels"]
+            config.context["projects"] = presets["projects"]
+            config.context["organizations"] = presets["organizations"]
+            config.context["tags"] = presets["tags"]
+            config.context["profiles"] = presets["profiles"]
+            save_config(config_path, config)
+            org_combo["values"] = presets["organizations"]
+            project_combo["values"] = presets["projects"]
+            channel_combo["values"] = presets["channels"]
+            context_combo["values"] = presets["context_types"]
+            profile_combo["values"] = [p.get("name") for p in presets["profiles"]]
+            _set_status("Lists saved")
+
+        btn_row_lists = ttk.Frame(frame)
+        btn_row_lists.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        ttk.Button(btn_row_lists, text="Save", command=_save_lists).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Button(btn_row_lists, text="Close", command=win.destroy).grid(
+            row=0, column=1, sticky="e", padx=(6, 0)
+        )
+
+    def _save_profile_dialog() -> None:
+        logger.info("Open save profile dialog")
+        win = tk.Toplevel(root)
+        win.title("Save profile")
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=8)
+        frame.grid(row=0, column=0, sticky="nsew")
+        profile_name_var.set(profile_var.get().strip())
+        ttk.Label(frame, text="Profile name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=profile_name_var, width=24).grid(
+            row=0, column=1, sticky="w"
+        )
+
+        def _save_and_close() -> None:
+            _save_profile()
+            win.destroy()
+
+        ttk.Button(frame, text="Save", command=_save_and_close).grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        ttk.Button(frame, text="Cancel", command=win.destroy).grid(
+            row=1, column=1, sticky="e", pady=(6, 0)
+        )
+
+    settings_menu.add_command(label="Audio settings...", command=_open_audio_settings)
+    settings_menu.add_command(
+        label="Transcription settings...", command=_open_transcription_settings
+    )
+    settings_menu.add_command(label="Output settings...", command=_open_output_settings)
+    settings_menu.add_separator()
+    settings_menu.add_command(label="Save defaults", command=_save_defaults)
+    settings_menu.add_command(label="Save profile...", command=_save_profile_dialog)
+    settings_menu.add_command(label="My profile...", command=_open_my_profile)
+    settings_menu.add_command(label="Manage lists...", command=_open_manage_lists)
+    settings_menu.add_command(label="Clear metadata", command=_clear_fields)
+
+    view_menu.add_command(label="Open Levels HUD", command=_open_hud)
+    view_menu.add_command(label="Reset Peaks", command=_reset_peaks)
+
     main = ttk.Frame(root, padding=8)
     main.grid(row=0, column=0, sticky="nsew")
 
     ttk.Label(
         main,
-        text="EchoFrame setup: fill context, pick capture mode, then Start.",
-    ).grid(row=0, column=0, columnspan=5, sticky="w", pady=(0, 6))
-
-    ttk.Label(main, text="Title").grid(row=1, column=0, sticky="w")
-    title_var = tk.StringVar()
-    title_entry = ttk.Entry(main, textvariable=title_var, width=36)
-    title_entry.grid(row=1, column=1, columnspan=4, sticky="w")
-    _ToolTip(title_entry, "Session title used in filenames and notes.")
-
-    ttk.Label(main, text="Your name").grid(row=2, column=0, sticky="w")
-    user_name_var = tk.StringVar(value=config.context.get("user_name", ""))
-    user_name_entry = ttk.Entry(main, textvariable=user_name_var, width=20)
-    user_name_entry.grid(row=2, column=1, sticky="w")
-    _ToolTip(user_name_entry, "Your name for participants metadata.")
-    ttk.Label(main, text="Attendees").grid(row=2, column=2, sticky="w")
-    attendees_var = tk.StringVar()
-    attendees_entry = ttk.Entry(main, textvariable=attendees_var, width=18)
-    attendees_entry.grid(row=2, column=3, sticky="w")
-    _ToolTip(attendees_entry, "Comma-separated list of other attendees.")
-
-    ttk.Label(main, text="Contact").grid(row=3, column=0, sticky="w")
-    contact_var = tk.StringVar()
-    contact_entry = ttk.Entry(main, textvariable=contact_var, width=20)
-    contact_entry.grid(row=3, column=1, sticky="w")
-    _ToolTip(contact_entry, "Primary contact name for the session.")
-    ttk.Label(main, text="ID").grid(row=3, column=2, sticky="w")
-    contact_id_var = tk.StringVar()
-    contact_id_entry = ttk.Entry(main, textvariable=contact_id_var, width=18)
-    contact_id_entry.grid(row=3, column=3, sticky="w")
-    _ToolTip(contact_id_entry, "Internal contact ID or client ID.")
-
-    ttk.Label(main, text="Org").grid(row=4, column=0, sticky="w")
-    org_var = tk.StringVar()
-    org_combo = ttk.Combobox(
-        main, textvariable=org_var, values=presets["organizations"], width=18
-    )
-    org_combo.grid(row=4, column=1, sticky="w")
-    _ToolTip(org_combo, "Organization or client company.")
-    ttk.Label(main, text="Project").grid(row=4, column=2, sticky="w")
-    project_var = tk.StringVar()
-    project_combo = ttk.Combobox(
-        main, textvariable=project_var, values=presets["projects"], width=18
-    )
-    project_combo.grid(row=4, column=3, sticky="w")
-    _ToolTip(project_combo, "Project or research initiative.")
-
-    ttk.Label(main, text="Location").grid(row=5, column=0, sticky="w")
-    location_var = tk.StringVar()
-    location_entry = ttk.Entry(main, textvariable=location_var, width=20)
-    location_entry.grid(row=5, column=1, sticky="w")
-    _ToolTip(location_entry, "Physical location or meeting room.")
-    ttk.Label(main, text="Channel").grid(row=5, column=2, sticky="w")
-    channel_var = tk.StringVar(
-        value=config.context.get("default_channel", presets["channels"][0])
-    )
-    channel_combo = ttk.Combobox(
-        main, textvariable=channel_var, values=presets["channels"], width=18
-    )
-    channel_combo.grid(row=5, column=3, sticky="w")
-    _ToolTip(channel_combo, "How the session happened (in_person/phone/webchat).")
-
-    ttk.Label(main, text="Notes").grid(row=6, column=0, sticky="nw")
-    notes_box = tk.Text(main, width=36, height=3)
-    notes_box.grid(row=6, column=1, columnspan=4, sticky="w")
-    _ToolTip(notes_box, "Context notes to compare against the transcript.")
-
-    ttk.Label(main, text="Tags").grid(row=7, column=0, sticky="w")
-    tags_var = tk.StringVar()
-    tags_entry = ttk.Entry(main, textvariable=tags_var, width=20)
-    tags_entry.grid(row=7, column=1, sticky="w")
-    _ToolTip(tags_entry, "Comma-separated tags for Obsidian.")
-    auto_tags_var = tk.BooleanVar(value=True)
-    auto_tags_cb = ttk.Checkbutton(main, text="Auto tags", variable=auto_tags_var)
-    auto_tags_cb.grid(row=7, column=2, sticky="w")
-    _ToolTip(auto_tags_cb, "Auto-add context type and project.")
-
-    ttk.Label(main, text="Type").grid(row=7, column=3, sticky="w")
-    context_type_var = tk.StringVar(
-        value=config.context.get("default_context_type", presets["context_types"][0])
-    )
-    context_combo = ttk.Combobox(
+        text="EchoFrame: metadata on top, settings in menus, then Start.",
+    ).grid(row=0, column=0, sticky="w", pady=(0, 2))
+    ttk.Label(
         main,
+        text="Capture modes: mic = physical mic, system = app audio via loopback, dual = mic + system.",
+        foreground="#6aa6ff",
+    ).grid(row=1, column=0, sticky="w", pady=(0, 6))
+
+    title_var = tk.StringVar(value=_last_used_value("title", ""))
+    user_name_var = tk.StringVar(
+        value=_last_used_value("user_name", config.context.get("user_name", ""))
+    )
+    attendees_var = tk.StringVar(value=_last_used_value("attendees", ""))
+    contact_var = tk.StringVar(value=_last_used_value("contact", ""))
+    contact_id_var = tk.StringVar(value=_last_used_value("contact_id", ""))
+    org_var = tk.StringVar(value=_last_used_value("org", ""))
+    project_var = tk.StringVar(value=_last_used_value("project", ""))
+    location_var = tk.StringVar(value=_last_used_value("location", ""))
+    channel_var = tk.StringVar(
+        value=_last_used_value(
+            "channel", config.context.get("default_channel", presets["channels"][0])
+        )
+    )
+    tags_var = tk.StringVar(value=_last_used_value("tags", ""))
+    auto_tags_var = tk.BooleanVar(value=last_used.get("auto_tags", True))
+    context_type_var = tk.StringVar(
+        value=_last_used_value(
+            "context_type",
+            config.context.get("default_context_type", presets["context_types"][0]),
+        )
+    )
+    profile_var = tk.StringVar(value=_last_used_value("profile", ""))
+    profile_name_var = tk.StringVar()
+    notes_box = None
+
+    capture_mode_var = tk.StringVar(
+        value=_last_used_value("capture_mode", "mic")
+    )
+    if capture_mode_var.get() not in ("mic", "system", "dual"):
+        capture_mode_var.set("mic")
+    mic_device_var = tk.StringVar(
+        value=_last_used_value("mic_device", config.device_name or "")
+    )
+    system_device_var = tk.StringVar(value=_last_used_value("system_device", ""))
+    rate_var = tk.StringVar(
+        value=_last_used_value("rate", str(config.audio.sample_rate_hz))
+    )
+    mic_channels_var = tk.StringVar(
+        value=_last_used_value("mic_channels", str(config.audio.channels))
+    )
+    system_channels_var = tk.StringVar(
+        value=_last_used_value("system_channels", "2")
+    )
+
+    model_var = tk.StringVar(value=_last_used_value("model", config.whisper_model))
+    live_model_var = tk.StringVar(value=_last_used_value("live_model", "tiny"))
+    language_var = tk.StringVar(value=_last_used_value("language", ""))
+    device_pref_var = tk.StringVar(value=_last_used_value("device_pref", ""))
+    compute_type_var = tk.StringVar(value=_last_used_value("compute_type", ""))
+    diarize_var = tk.BooleanVar(value=bool(last_used.get("diarize", False)))
+    hf_token_var = tk.StringVar(value=_last_used_value("hf_token", ""))
+    speaker_map_var = tk.StringVar(value=_last_used_value("speaker_map", ""))
+    use_type_folders_var = tk.BooleanVar(
+        value=bool(last_used.get("use_type_folders", config.context.get("use_type_folders", False)))
+    )
+    live_transcribe_var = tk.BooleanVar(
+        value=bool(last_used.get("live_transcribe", True))
+    )
+
+    def _auto_configure_system_device() -> None:
+        if system_device_var.get().strip():
+            return
+        try:
+            outputs = list_input_devices(loopback=True)
+        except Exception as exc:
+            logger.debug("Auto-detect system device failed: %s", exc)
+            return
+        if not outputs:
+            return
+        preferred = next(
+            (
+                d
+                for d in outputs
+                if "sound mapper" not in d.get("name", "").lower()
+            ),
+            outputs[0],
+        )
+        name = preferred.get("name")
+        if name:
+            system_device_var.set(name)
+            logger.info("Auto-configured system device: %s", name)
+
+    def _auto_configure_h2() -> None:
+        try:
+            devices = list_input_devices(loopback=False)
+        except Exception as exc:
+            logger.debug("Auto-detect H2 failed: %s", exc)
+            return
+        current_name = mic_device_var.get().strip()
+        current_match = (
+            next((d for d in devices if d.get("name") == current_name), None)
+            if current_name
+            else None
+        )
+        zoom_name = find_zoom_name_from_candidates(devices)
+        if current_match is None and zoom_name:
+            mic_device_var.set(zoom_name)
+            capture_mode_var.set("mic")
+            system_device_var.set("")
+            match = next((d for d in devices if d.get("name") == zoom_name), None)
+            max_in = match.get("max_input_channels", 0) if match else 0
+            if max_in:
+                mic_channels_var.set(str(min(4, max_in)))
+                if max_in < 4:
+                    logger.info("Zoom device supports %s channels", max_in)
+            logger.info("Auto-configured H2 mic: %s", zoom_name)
+
+    if capture_mode_var.get() in ("system", "dual"):
+        _auto_configure_system_device()
+    _auto_configure_h2()
+    _apply_my_profile(my_profile)
+
+    meta = ttk.LabelFrame(main, text="Obsidian metadata", style="Neo.TLabelframe")
+    meta.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+    meta.columnconfigure(1, weight=1)
+    meta.columnconfigure(3, weight=1)
+
+    ttk.Label(meta, text="Title").grid(row=0, column=0, sticky="w")
+    title_entry = ttk.Entry(meta, textvariable=title_var, width=52)
+    title_entry.grid(row=0, column=1, columnspan=3, sticky="ew")
+    _ToolTip(title_entry, "Session title used for file names and notes.")
+
+    ttk.Label(meta, text="Your name").grid(row=1, column=0, sticky="w")
+    user_name_entry = ttk.Entry(meta, textvariable=user_name_var, width=24)
+    user_name_entry.grid(row=1, column=1, sticky="ew")
+    _ToolTip(user_name_entry, "Your name for participants metadata.")
+    ttk.Label(meta, text="Attendees").grid(row=1, column=2, sticky="w")
+    attendees_entry = ttk.Entry(meta, textvariable=attendees_var, width=24)
+    attendees_entry.grid(row=1, column=3, sticky="ew")
+    _ToolTip(attendees_entry, "Comma-separated list of attendees.")
+
+    ttk.Label(meta, text="Contact").grid(row=2, column=0, sticky="w")
+    contact_entry = ttk.Entry(meta, textvariable=contact_var, width=24)
+    contact_entry.grid(row=2, column=1, sticky="ew")
+    _ToolTip(contact_entry, "Primary contact for the session.")
+    ttk.Label(meta, text="ID").grid(row=2, column=2, sticky="w")
+    contact_id_entry = ttk.Entry(meta, textvariable=contact_id_var, width=24)
+    contact_id_entry.grid(row=2, column=3, sticky="ew")
+    _ToolTip(contact_id_entry, "Internal contact/client ID.")
+
+    ttk.Label(meta, text="Org").grid(row=3, column=0, sticky="w")
+    org_combo = ttk.Combobox(
+        meta, textvariable=org_var, values=presets["organizations"], width=22
+    )
+    org_combo.grid(row=3, column=1, sticky="ew")
+    _ToolTip(org_combo, "Organization or client company.")
+    ttk.Label(meta, text="Project").grid(row=3, column=2, sticky="w")
+    project_combo = ttk.Combobox(
+        meta, textvariable=project_var, values=presets["projects"], width=22
+    )
+    project_combo.grid(row=3, column=3, sticky="ew")
+    _ToolTip(project_combo, "Project or initiative label.")
+
+    ttk.Label(meta, text="Location").grid(row=4, column=0, sticky="w")
+    location_entry = ttk.Entry(meta, textvariable=location_var, width=24)
+    location_entry.grid(row=4, column=1, sticky="ew")
+    _ToolTip(location_entry, "Physical location or meeting room.")
+    ttk.Label(meta, text="Channel").grid(row=4, column=2, sticky="w")
+    channel_combo = ttk.Combobox(
+        meta, textvariable=channel_var, values=presets["channels"], width=22
+    )
+    channel_combo.grid(row=4, column=3, sticky="ew")
+    _ToolTip(channel_combo, "Session channel (in_person/phone/webchat).")
+
+    ttk.Label(meta, text="Tags").grid(row=5, column=0, sticky="w")
+    tags_entry = ttk.Entry(meta, textvariable=tags_var, width=24)
+    tags_entry.grid(row=5, column=1, sticky="ew")
+    _ToolTip(tags_entry, "Comma-separated tags for Obsidian.")
+    ttk.Label(meta, text="Type").grid(row=5, column=2, sticky="w")
+    context_combo = ttk.Combobox(
+        meta,
         textvariable=context_type_var,
         values=presets["context_types"],
-        width=18,
+        width=22,
     )
-    context_combo.grid(row=8, column=3, sticky="w")
+    context_combo.grid(row=5, column=3, sticky="ew")
     _ToolTip(context_combo, "Context type used in frontmatter.")
 
-    use_type_folders_var = tk.BooleanVar(
-        value=config.context.get("use_type_folders", False)
-    )
-    use_type_folders_cb = ttk.Checkbutton(
-        main, text="Type folders", variable=use_type_folders_var
-    )
-    use_type_folders_cb.grid(row=8, column=4, sticky="w")
-    _ToolTip(use_type_folders_cb, "Organize recordings/notes by context type.")
-
-    ttk.Label(main, text="Profile").grid(row=8, column=0, sticky="w")
-    profile_var = tk.StringVar()
+    auto_tags_cb = ttk.Checkbutton(meta, text="Auto tags", variable=auto_tags_var)
+    auto_tags_cb.grid(row=6, column=0, sticky="w")
+    _ToolTip(auto_tags_cb, "Auto-add context type and project to tags.")
+    ttk.Label(meta, text="Profile").grid(row=6, column=2, sticky="w")
     profile_combo = ttk.Combobox(
-        main,
+        meta,
         textvariable=profile_var,
         values=[p.get("name") for p in presets["profiles"]],
-        width=18,
+        width=22,
     )
-    profile_combo.grid(row=8, column=1, sticky="w")
+    profile_combo.grid(row=6, column=3, sticky="ew")
     profile_combo.bind("<<ComboboxSelected>>", _apply_profile)
-    profile_name_var = tk.StringVar()
-    profile_name_entry = ttk.Entry(main, textvariable=profile_name_var, width=18)
-    profile_name_entry.grid(row=8, column=2, sticky="w")
-    _ToolTip(profile_combo, "Load a preset of multiple fields.")
-    _ToolTip(profile_name_entry, "Name to save current fields as a profile.")
+    _ToolTip(profile_combo, "Apply a saved profile to auto-fill fields.")
 
-    ttk.Label(main, text="Capture").grid(row=9, column=0, sticky="w")
-    capture_mode_var = tk.StringVar(value="mic")
-    capture_combo = ttk.Combobox(
-        main,
-        textvariable=capture_mode_var,
-        values=["mic", "system", "dual"],
-        width=10,
-        state="readonly",
+    ttk.Label(meta, text="Notes").grid(row=7, column=0, sticky="nw")
+    notes_box = tk.Text(
+        meta,
+        width=52,
+        height=3,
+        bg="#0b0f14",
+        fg="#d8e1ff",
+        insertbackground="#8bd3ff",
+        highlightthickness=0,
+        bd=0,
+        relief="flat",
     )
-    capture_combo.grid(row=9, column=1, sticky="w")
-    _ToolTip(capture_combo, "Mic/system/dual capture mode.")
-
-    ttk.Label(main, text="Mic device").grid(row=9, column=2, sticky="w")
-    mic_device_var = tk.StringVar(value=config.device_name or "")
-    mic_device_entry = ttk.Entry(main, textvariable=mic_device_var, width=18)
-    mic_device_entry.grid(row=9, column=3, sticky="w")
-    _ToolTip(mic_device_entry, "Mic device name substring (Zoom H2).")
-
-    ttk.Label(main, text="System device").grid(row=10, column=0, sticky="w")
-    system_device_var = tk.StringVar()
-    system_device_entry = ttk.Entry(main, textvariable=system_device_var, width=20)
-    system_device_entry.grid(row=10, column=1, sticky="w")
-    _ToolTip(system_device_entry, "Output device for app audio via loopback.")
-    ttk.Label(main, text="Rate").grid(row=10, column=2, sticky="w")
-    rate_var = tk.StringVar(value=str(config.audio.sample_rate_hz))
-    rate_entry = ttk.Entry(main, textvariable=rate_var, width=8)
-    rate_entry.grid(row=10, column=3, sticky="w")
-    _ToolTip(rate_entry, "Sample rate (44100 or 48000).")
-
-    ttk.Label(main, text="Mic channels").grid(row=11, column=0, sticky="w")
-    mic_channels_var = tk.StringVar(value=str(config.audio.channels))
-    mic_channels_combo = ttk.Combobox(
-        main,
-        textvariable=mic_channels_var,
-        values=["1", "2", "4"],
-        width=6,
-    )
-    mic_channels_combo.grid(row=11, column=1, sticky="w")
-    _ToolTip(mic_channels_combo, "Mic input channels (H2 supports 4).")
-    ttk.Label(main, text="System channels").grid(row=11, column=2, sticky="w")
-    system_channels_var = tk.StringVar(value="2")
-    system_channels_combo = ttk.Combobox(
-        main,
-        textvariable=system_channels_var,
-        values=["1", "2", "4"],
-        width=6,
-    )
-    system_channels_combo.grid(row=11, column=3, sticky="w")
-    _ToolTip(system_channels_combo, "System output channels for loopback.")
-
-    ttk.Label(main, text="Model").grid(row=12, column=0, sticky="w")
-    model_var = tk.StringVar(value=config.whisper_model)
-    model_entry = ttk.Entry(main, textvariable=model_var, width=8)
-    model_entry.grid(row=12, column=1, sticky="w")
-    _ToolTip(model_entry, "Whisper model size (tiny/base/small/medium/large).")
-    ttk.Label(main, text="Language").grid(row=12, column=2, sticky="w")
-    language_var = tk.StringVar()
-    language_entry = ttk.Entry(main, textvariable=language_var, width=8)
-    language_entry.grid(row=12, column=3, sticky="w")
-    _ToolTip(language_entry, "Optional language code (e.g., en).")
-
-    ttk.Label(main, text="Device pref").grid(row=13, column=0, sticky="w")
-    device_pref_var = tk.StringVar()
-    device_pref_entry = ttk.Entry(main, textvariable=device_pref_var, width=8)
-    device_pref_entry.grid(row=13, column=1, sticky="w")
-    _ToolTip(device_pref_entry, "Preferred compute device (cpu/cuda).")
-    ttk.Label(main, text="Compute").grid(row=13, column=2, sticky="w")
-    compute_type_var = tk.StringVar()
-    compute_entry = ttk.Entry(main, textvariable=compute_type_var, width=8)
-    compute_entry.grid(row=13, column=3, sticky="w")
-    _ToolTip(compute_entry, "Compute type (e.g., int8, float16).")
-
-    diarize_var = tk.BooleanVar(value=False)
-    diarize_cb = ttk.Checkbutton(main, text="Diarize", variable=diarize_var)
-    diarize_cb.grid(row=14, column=0, sticky="w")
-    _ToolTip(diarize_cb, "Enable speaker diarization.")
-    ttk.Label(main, text="HF token").grid(row=14, column=1, sticky="w")
-    hf_token_var = tk.StringVar()
-    hf_token_entry = ttk.Entry(main, textvariable=hf_token_var, width=20)
-    hf_token_entry.grid(row=14, column=2, sticky="w")
-    _ToolTip(hf_token_entry, "HuggingFace token for pyannote model.")
-
-    ttk.Label(main, text="Speaker map").grid(row=15, column=0, sticky="w")
-    speaker_map_var = tk.StringVar()
-    speaker_map_entry = ttk.Entry(main, textvariable=speaker_map_var, width=12)
-    speaker_map_entry.grid(row=15, column=1, sticky="w")
-    _ToolTip(speaker_map_entry, "Map speakers (Speaker_0:Matt,...).")
+    notes_box.grid(row=7, column=1, columnspan=3, sticky="ew")
+    notes_box.insert("1.0", _last_used_value("notes", ""))
+    _ToolTip(notes_box, "Freeform notes to compare with the transcript.")
 
     btn_row = ttk.Frame(main)
-    btn_row.grid(row=16, column=0, columnspan=5, sticky="w", pady=(6, 0))
+    btn_row.grid(row=3, column=0, sticky="w", pady=(6, 0))
     for idx, label in enumerate(presets["context_types"]):
-        ttk.Button(
-            btn_row, text=label, command=lambda l=label: _start_recording(l)
-        ).grid(row=0, column=idx, padx=2)
+        btn = ttk.Button(
+            btn_row, text=label, command=lambda l=label: _apply_context_type(l)
+        )
+        btn.grid(row=0, column=idx, padx=2)
+        _ToolTip(btn, f"Apply {label} metadata without starting recording.")
 
-    ttk.Button(main, text="Start", command=_start_custom).grid(
-        row=17, column=0, sticky="w", pady=(6, 0)
+    control_row = ttk.Frame(main)
+    control_row.grid(row=4, column=0, sticky="w", pady=(6, 0))
+    ttk.Button(control_row, text="Start", command=_start_custom).grid(
+        row=0, column=0, padx=2
     )
-    ttk.Button(main, text="Save Defaults", command=_save_defaults).grid(
-        row=17, column=1, sticky="w", pady=(6, 0)
+    ttk.Button(control_row, text="Stop", command=_stop_recording).grid(
+        row=0, column=1, padx=2
     )
-    ttk.Button(main, text="Save Profile", command=_save_profile).grid(
-        row=17, column=2, sticky="w", pady=(6, 0)
+    ttk.Button(control_row, text="Clear", command=_clear_fields).grid(
+        row=0, column=2, padx=2
     )
-    ttk.Button(main, text="Stop", command=_stop_recording).grid(
-        row=17, column=3, sticky="w", pady=(6, 0)
+    ttk.Button(control_row, text="Monitor", command=_toggle_monitor).grid(
+        row=0, column=3, padx=2
     )
+    ttk.Button(control_row, text="Reset Peaks", command=_reset_peaks).grid(
+        row=0, column=4, padx=2
+    )
+    buttons = control_row.winfo_children()
+    _ToolTip(buttons[0], "Start recording with current metadata.")
+    _ToolTip(buttons[1], "Stop recording and begin transcription.")
+    _ToolTip(buttons[2], "Clear metadata fields (keeps defaults).")
+    _ToolTip(buttons[3], "Toggle live meter monitoring only.")
+    _ToolTip(buttons[4], "Reset peak hold indicators.")
 
+    meter_frame = ttk.LabelFrame(main, text="Live audio meters", style="Neo.TLabelframe")
+    meter_frame.grid(row=5, column=0, sticky="ew", pady=(6, 0))
+    meter_canvas = tk.Canvas(
+        meter_frame,
+        width=520,
+        height=120,
+        bg="#0f1a2a",
+        highlightthickness=0,
+        bd=0,
+    )
+    meter_canvas.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
+    _ToolTip(meter_canvas, "Per-channel level meters and peak holds.")
+
+    transcript_frame = ttk.LabelFrame(main, text="Live transcript", style="Neo.TLabelframe")
+    transcript_frame.grid(row=6, column=0, sticky="ew", pady=(6, 0))
+    transcript_box = tk.Text(
+        transcript_frame,
+        width=60,
+        height=5,
+        wrap="word",
+        bg="#0b0f14",
+        fg="#d8e1ff",
+        insertbackground="#8bd3ff",
+        highlightthickness=0,
+        bd=0,
+        relief="flat",
+    )
+    transcript_box.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
+    transcript_box.configure(state="disabled")
+    _ToolTip(transcript_box, "Live transcript (red), final (orange), diarized (green).")
+    transcript_box.tag_configure("live", foreground="#ff4d6d")
+    transcript_box.tag_configure("final", foreground="#ff9f43")
+    transcript_box.tag_configure("diarized", foreground="#32ff7e")
+
+    progress_frame = ttk.Frame(main)
+    progress_frame.grid(row=7, column=0, sticky="ew", pady=(6, 0))
+    progress_label_var = tk.StringVar(value="Final transcription idle")
+    ttk.Label(progress_frame, textvariable=progress_label_var).grid(
+        row=0, column=0, sticky="w"
+    )
+    progress_var = tk.IntVar(value=0)
+    ttk.Progressbar(
+        progress_frame,
+        maximum=100,
+        variable=progress_var,
+        length=220,
+        style="Neo.Horizontal.TProgressbar",
+    ).grid(
+        row=0, column=1, sticky="w", padx=(8, 0)
+    )
+    _ToolTip(progress_frame, "Progress for final transcription and diarization.")
+
+    status_row = ttk.Frame(main)
+    status_row.grid(row=8, column=0, sticky="ew", pady=(6, 0))
     timer_var = tk.StringVar(value="00:00")
-    ttk.Label(main, textvariable=timer_var).grid(
-        row=18, column=0, sticky="w", pady=(6, 0)
-    )
-    ttk.Button(main, text="Clear", command=_clear_fields).grid(
-        row=18, column=1, sticky="w", pady=(6, 0)
-    )
-    ttk.Button(main, text="Monitor", command=_toggle_monitor).grid(
-        row=18, column=2, sticky="w", pady=(6, 0)
-    )
-    ttk.Button(main, text="HUD", command=_open_hud).grid(
-        row=18, column=3, sticky="w", pady=(6, 0)
-    )
-    ttk.Button(main, text="Reset Peaks", command=_reset_peaks).grid(
-        row=18, column=4, sticky="w", pady=(6, 0)
-    )
-
-    meter_var = tk.IntVar(value=0)
-    ttk.Progressbar(main, maximum=100, variable=meter_var, length=120).grid(
-        row=19, column=0, sticky="w", pady=(6, 0)
-    )
-
+    ttk.Label(status_row, textvariable=timer_var).grid(row=0, column=0, sticky="w")
     level_var = tk.StringVar(value="0.00")
     peak_var = tk.StringVar(value="0.00")
-    ttk.Label(main, text="Level").grid(row=19, column=1, sticky="w", pady=(6, 0))
-    ttk.Label(main, textvariable=level_var).grid(
-        row=19, column=2, sticky="w", pady=(6, 0)
-    )
-    ttk.Label(main, text="Peak").grid(row=19, column=3, sticky="w", pady=(6, 0))
-    ttk.Label(main, textvariable=peak_var).grid(
-        row=19, column=4, sticky="w", pady=(6, 0)
-    )
-
+    ttk.Label(status_row, text="Level").grid(row=0, column=1, sticky="w", padx=(12, 0))
+    ttk.Label(status_row, textvariable=level_var).grid(row=0, column=2, sticky="w")
+    ttk.Label(status_row, text="Peak").grid(row=0, column=3, sticky="w", padx=(12, 0))
+    ttk.Label(status_row, textvariable=peak_var).grid(row=0, column=4, sticky="w")
     status_var = tk.StringVar(value="Idle")
-    ttk.Label(main, textvariable=status_var).grid(
-        row=20, column=0, columnspan=4, sticky="w", pady=(6, 0)
-    )
+    ttk.Label(status_row, textvariable=status_var).grid(row=0, column=5, sticky="w", padx=(12, 0))
 
     debug_enabled_var = tk.BooleanVar(value=debug_enabled)
-    debug_badge = ttk.Label(main, text="DEBUG", foreground="red")
+    debug_badge = ttk.Label(status_row, text="DEBUG", foreground="red")
     if debug_enabled_var.get():
-        debug_badge.grid(row=20, column=4, sticky="e", pady=(6, 0))
+        debug_badge.grid(row=0, column=6, sticky="e", padx=(12, 0))
 
     def _update_debug_badge() -> None:
         if debug_enabled_var.get():
-            debug_badge.grid(row=20, column=4, sticky="e", pady=(6, 0))
+            debug_badge.grid(row=0, column=6, sticky="e", padx=(12, 0))
         else:
             debug_badge.grid_forget()
 
     def _bind_preset_updates() -> None:
+        bindings = [
+            (title_entry, "title"),
+            (user_name_entry, "user_name"),
+            (attendees_entry, "attendees"),
+            (contact_entry, "contact"),
+            (contact_id_entry, "contact_id"),
+            (org_combo, "org"),
+            (project_combo, "project"),
+            (location_entry, "location"),
+            (channel_combo, "channel"),
+            (tags_entry, "tags"),
+            (context_combo, "context_type"),
+            (profile_combo, "profile"),
+            (notes_box, "notes"),
+        ]
+        for widget, field_name in bindings:
+            widget.bind("<FocusOut>", lambda _e, n=field_name: _log_field_change(n))
         org_combo.bind(
             "<FocusOut>",
             lambda _e: _remember_preset("organizations", org_var.get()),
@@ -929,9 +2214,17 @@ def launch_gui() -> None:
                 _remember_preset("tags", t) for t in tags_var.get().split(",")
             ],
         )
-        profile_combo.bind("<<ComboboxSelected>>", _apply_profile)
+
+    def _on_close() -> None:
+        logger.info("GUI closing")
+        _stop_live_transcriber()
+        _save_last_used()
+        root.destroy()
 
     _bind_preset_updates()
     _update_timer()
     _update_meter()
+    _poll_transcript()
+    _poll_transcribe_progress()
+    root.protocol("WM_DELETE_WINDOW", _on_close)
     root.mainloop()

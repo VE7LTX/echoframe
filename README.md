@@ -11,10 +11,14 @@ Prototype working: GUI bar, local recording, Faster-Whisper transcription, optio
 - Local capture from Zoom H2/H4, headset/webcam mics, or Windows system audio (loopback)
 - Dual-track mode: mic + system in one multichannel WAV
 - Faster-Whisper transcription with timestamps
+- Live transcript preview in the GUI while recording
+- Live vs final model split with progress indicator
 - Optional speaker diarization with pyannote
 - Obsidian YAML frontmatter + Markdown transcript
 - Context metadata (participants, project, channel, notes)
 - Compact Tkinter GUI with presets, profiles, and audio HUD
+- Auto-detect Zoom H2/H4 and default to 4-channel mic capture when supported
+- My Profile defaults and CRUD list management for dropdowns
 
 ## Quickstart (Windows)
 Install Python dependencies:
@@ -32,6 +36,9 @@ python -m echoframe.cli gui
 - mic: record from Zoom H2/H4 or other mic devices.
 - system: capture app audio via WASAPI loopback.
 - dual: record mic + system audio together (separate tracks).
+
+Note: some Zoom H2/H4 modes expose only 2 channels to Windows. EchoFrame will
+clamp channel counts to what the device reports.
 
 System audio isolation (no virtual cable):
 1) Windows Settings > System > Sound > App volume and device preferences.
@@ -68,9 +75,11 @@ Notes\Interview\
 ```
 echoframe devices
 echoframe devices --loopback
-echoframe record --mode mic --mic-device "Zoom H2"
+echoframe devices --detail
+echoframe record --mode mic --mic-device "Zoom H2" --channels 4
 echoframe record --mode system --system-device "Speakers"
 echoframe record --mode dual --mic-device "Zoom H2" --system-device "Speakers"
+echoframe h2 --duration 60 --transcribe
 echoframe transcribe path/to/audio.wav --model small --out segments.json
 echoframe show path/to/session.session.json
 ```

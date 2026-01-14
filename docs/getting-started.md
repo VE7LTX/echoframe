@@ -35,18 +35,26 @@ device_name: "Zoom H2"
 whisper_model: "small"
 audio:
   sample_rate_hz: 44100
-  channels: 4
+  channels: 2
 context:
   user_name: "Matt Schafer"
   default_context_type: "Interview"
   default_channel: "in_person"
 ```
+Note: some Zoom H2/H4 modes expose only 2 channels to Windows. EchoFrame clamps
+to the max channels reported by the device.
 
 ## Run the GUI
 ```powershell
 $env:PYTHONPATH='C:\echoframe\src'
 python -m echoframe.cli gui
 ```
+
+## First-run setup
+1) Settings > My profile: set your defaults (name, org, tags, language).
+2) Settings > Manage lists: add orgs, projects, channels, tags, and profiles.
+3) Settings > Audio settings: pick the mic device (Zoom H2/H4).
+4) Settings > Transcription settings: set final and live models.
 
 ## Capture modes
 - mic: Zoom H2/H4 or any mic

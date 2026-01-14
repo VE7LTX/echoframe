@@ -9,15 +9,20 @@ import os
 import json
 
 from .recorder import (
+    find_device_info_by_name,
+    find_zoom_name_from_candidates,
     list_input_devices,
     record_audio,
     record_audio_stream,
     record_audio_stream_dual,
 )
 from .transcriber import transcribe_audio
-from .storage import build_session_basename, get_output_dirs
+from .renderer import render_note
+from .storage import build_session_basename, ensure_dir, get_output_dirs
 from .config import load_config
-from .session_io import load_session, load_segments
+from .session_io import load_session, load_segments, save_segments, save_session
+from .models import Session
+from .audio_utils import extract_channels
 
 
 def main() -> int:
@@ -30,6 +35,11 @@ def main() -> int:
         "--loopback",
         action="store_true",
         help="List output devices for system audio capture (WASAPI).",
+    )
+    devices_cmd.add_argument(
+        "--detail",
+        action="store_true",
+        help="Show detailed device channel info.",
     )
 
     record_cmd = sub.add_parser("record")
@@ -65,6 +75,28 @@ def main() -> int:
         "--system-channels", type=int, default=2, help="System channels."
     )
 
+    h2_cmd = sub.add_parser("h2")
+    h2_cmd.add_argument("--title", default="Session", help="Session title.")
+    h2_cmd.add_argument("--config", default="echoframe_config.yml", help="Config.")
+    h2_cmd.add_argument("--base-dir", help="Base output directory.")
+    h2_cmd.add_argument("--context-type", default="Interview", help="Context type.")
+    h2_cmd.add_argument(
+        "--use-type-folders",
+        action="store_true",
+        help="Store recordings/notes under context type subfolders.",
+    )
+    h2_cmd.add_argument(
+        "--duration", type=int, help="Seconds. Omit for manual stop."
+    )
+    h2_cmd.add_argument("--rate", type=int, default=44100, help="Sample rate.")
+    h2_cmd.add_argument(
+        "--channels", type=int, default=4, help="Mic channels (4 for H2)."
+    )
+    h2_cmd.add_argument("--device", help="Override device name substring.")
+    h2_cmd.add_argument("--transcribe", action="store_true", help="Transcribe + note.")
+    h2_cmd.add_argument("--model", default="small", help="Whisper model.")
+    h2_cmd.add_argument("--language", help="Language code.")
+
     transcribe_cmd = sub.add_parser("transcribe")
     transcribe_cmd.add_argument("audio_path", help="Path to audio file.")
     transcribe_cmd.add_argument("--model", default="small", help="Whisper model.")
@@ -90,10 +122,19 @@ def main() -> int:
             index = device.get("index", "?")
             if args.loopback:
                 channels = device.get("max_output_channels", 0)
-                print(f"[{index}] {name} (outputs: {channels})")
+                line = f"[{index}] {name} (outputs: {channels})"
             else:
                 channels = device.get("max_input_channels", 0)
-                print(f"[{index}] {name} (inputs: {channels})")
+                line = f"[{index}] {name} (inputs: {channels})"
+            if args.detail:
+                extra = []
+                if "default_samplerate" in device:
+                    extra.append(f"rate={device.get('default_samplerate')}")
+                if "hostapi" in device:
+                    extra.append(f"hostapi={device.get('hostapi')}")
+                if extra:
+                    line = f"{line} [{', '.join(extra)}]"
+            print(line)
         return 0
 
     if args.command == "record":
@@ -139,6 +180,122 @@ def main() -> int:
                 loopback=mode == "system" or args.loopback,
             )
         print(f"Wrote {output_path}")
+        return 0
+
+    if args.command == "h2":
+        base_dir = args.base_dir
+        if not base_dir and os.path.exists(args.config):
+            cfg = load_config(args.config)
+            base_dir = cfg.base_dir
+        paths = get_output_dirs(
+            base_dir or os.getcwd(),
+            context_type=args.context_type,
+            use_type_folders=bool(args.use_type_folders),
+        )
+        basename = build_session_basename(args.title, datetime.now())
+        output_path = os.path.join(paths["recordings"], f"{basename}.wav")
+        devices = list_input_devices(loopback=False)
+        device_name = None
+        if args.device:
+            info = find_device_info_by_name(args.device, loopback=False)
+            device_name = info.get("name") if info else None
+        if not device_name:
+            device_name = find_zoom_name_from_candidates(devices)
+        if not device_name:
+            print("Zoom H2/H4 device not found.")
+            return 1
+        info = find_device_info_by_name(device_name, loopback=False)
+        max_in = info.get("max_input_channels", 0) if info else 0
+        channels = min(args.channels, max_in) if max_in else args.channels
+        if channels != args.channels:
+            print(f"Adjusting mic channels to {channels} (max {max_in})")
+        if args.duration:
+            record_result = record_audio(
+                output_path=output_path,
+                duration_seconds=args.duration,
+                sample_rate_hz=args.rate,
+                channels=channels,
+                device_name=device_name,
+                loopback=False,
+            )
+        else:
+            record_result = record_audio_stream(
+                output_path=output_path,
+                sample_rate_hz=args.rate,
+                channels=channels,
+                device_name=device_name,
+                loopback=False,
+            )
+        print(f"Wrote {output_path}")
+        if not args.transcribe:
+            return 0
+
+        transcribe_path = output_path
+        if channels > 2:
+            segments_dir = paths["segments"]
+            ensure_dir(segments_dir)
+            front_path = os.path.join(segments_dir, f"{basename}.front.wav")
+            extract_channels(output_path, front_path, [0, 1])
+            transcribe_path = front_path
+
+        segments = transcribe_audio(
+            transcribe_path, model_name=args.model, language=args.language
+        )
+        note_text = render_note(
+            title=args.title,
+            date=datetime.now().strftime("%Y-%m-%d"),
+            audio_filename=os.path.basename(output_path),
+            segments=segments,
+            participants=None,
+            tags=[args.context_type] if args.context_type else None,
+            duration_seconds=record_result.duration_seconds,
+            device=device_name,
+            sample_rate_hz=args.rate,
+            bit_depth=16,
+            channels=channels,
+            capture_mode="mic",
+            mic_device=device_name,
+            system_device=None,
+            system_channels=0,
+            channel_map=["front_left", "front_right", "rear_left", "rear_right"][
+                : channels
+            ],
+            context_type=args.context_type,
+            contact_name=None,
+            contact_id=None,
+            organization=None,
+            project=None,
+            location=None,
+            channel=None,
+            context_notes=None,
+        )
+        note_path = os.path.join(paths["notes"], f"{basename}.md")
+        with open(note_path, "w", encoding="utf-8") as handle:
+            handle.write(note_text)
+        segments_path = os.path.join(paths["segments"], f"{basename}.segments.json")
+        save_segments(segments_path, segments)
+        session_path = os.path.join(paths["sessions"], f"{basename}.session.json")
+        session = Session(
+            session_id=basename,
+            title=args.title,
+            started_at=datetime.now().strftime("%Y-%m-%d"),
+            duration_seconds=record_result.duration_seconds,
+            audio_path=output_path,
+            segments=segments,
+            note_path=note_path,
+            ai_summary=None,
+            ai_sentiment=None,
+            context_type=args.context_type,
+            contact_name=None,
+            contact_id=None,
+            organization=None,
+            project=None,
+            location=None,
+            channel=None,
+            context_notes=None,
+        )
+        save_session(session_path, session)
+        print(f"Note saved: {note_path}")
         return 0
 
     if args.command == "transcribe":
