@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "echoframe"
+version = "0.1.0"
+description = "Local-first audio capture, transcription, and Obsidian note generation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Matt Schafer VE7LTX" }]
+keywords = ["transcription", "obsidian", "whisper", "audio"]
+
+[project.urls]
+Homepage = "https://github.com/ve7ltx/echoframe"
+
+[project.scripts]
+echoframe = "echoframe.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

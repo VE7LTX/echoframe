@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.env.*
+
+# Audio and outputs
+Recordings/
+Notes/
+audio_raw/
+transcripts/
+outputs/
+logs/
+*.wav
+*.mp3
+*.flac
+*.m4a
+
+# Models and caches
+.cache/
+models/
+whisper/
+*.pt
+*.bin
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
