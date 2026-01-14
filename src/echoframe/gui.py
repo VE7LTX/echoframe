@@ -85,6 +85,12 @@ def launch_gui() -> None:
         "level": 0.0,
         "peak": 0.0,
         "lock": threading.Lock(),
+        "channels": [],
+        "peaks": [],
+        "hud": None,
+        "hud_canvas": None,
+        "hud_items": [],
+        "labels": [],
     }
 
     def _set_status(text: str) -> None:
@@ -121,9 +127,14 @@ def launch_gui() -> None:
         with monitor["lock"]:
             level = monitor["level"]
             peak = monitor["peak"]
+            channels = list(monitor["channels"])
+            peaks = list(monitor["peaks"])
+            labels = list(monitor["labels"])
         meter_var.set(min(100, int(level * 100)))
         level_var.set(f"{level:.2f}")
         peak_var.set(f"{peak:.2f}")
+        if monitor["hud_canvas"] is not None:
+            _update_hud(channels, peaks, labels)
         root.after(200, _update_meter)
 
     def _toggle_monitor() -> None:
@@ -147,10 +158,22 @@ def launch_gui() -> None:
         def _cb(indata, _frames, _time, status):
             if status:
                 return
-            rms = float(np.sqrt(np.mean(indata.astype("float32") ** 2)))
+            data = indata.astype("float32")
+            rms = float(np.sqrt(np.mean(data ** 2)))
+            channel_rms = (
+                np.sqrt(np.mean(data ** 2, axis=0)).tolist()
+                if data.ndim == 2
+                else [rms]
+            )
             with monitor["lock"]:
                 monitor["level"] = rms
                 monitor["peak"] = max(monitor["peak"], rms)
+                monitor["channels"] = channel_rms
+                if not monitor["peaks"] or len(monitor["peaks"]) != len(channel_rms):
+                    monitor["peaks"] = [0.0] * len(channel_rms)
+                monitor["peaks"] = [
+                    max(p, c) for p, c in zip(monitor["peaks"], channel_rms)
+                ]
 
         mode = capture_mode_var.get()
         monitor_device = (
@@ -163,6 +186,7 @@ def launch_gui() -> None:
             if mode == "system"
             else int(mic_channels_var.get())
         )
+        monitor["labels"] = _channel_labels(mode)
         extra_settings = None
         try:
             if mode == "system" and hasattr(sd, "WasapiSettings"):
@@ -181,6 +205,75 @@ def launch_gui() -> None:
         except Exception as exc:
             _set_status(f"Monitor failed: {exc}")
 
+    def _channel_labels(mode: str) -> list[str]:
+        mic_count = int(mic_channels_var.get())
+        sys_count = int(system_channels_var.get())
+        mic_labels = ["front_left", "front_right", "rear_left", "rear_right"][:mic_count]
+        sys_labels = ["system_left", "system_right", "system_rl", "system_rr"][
+            :sys_count
+        ]
+        if mode == "dual":
+            return mic_labels + sys_labels
+        if mode == "system":
+            return sys_labels
+        return mic_labels
+
+    def _open_hud() -> None:
+        if monitor["hud"] is not None:
+            return
+        hud = tk.Toplevel(root)
+        hud.title("EchoFrame Levels")
+        hud.resizable(False, False)
+        canvas = tk.Canvas(hud, width=320, height=180, bg="black")
+        canvas.grid(row=0, column=0, padx=6, pady=6)
+        monitor["hud"] = hud
+        monitor["hud_canvas"] = canvas
+        monitor["hud_items"] = []
+        hud.protocol("WM_DELETE_WINDOW", _close_hud)
+
+    def _close_hud() -> None:
+        if monitor["hud"] is not None:
+            monitor["hud"].destroy()
+        monitor["hud"] = None
+        monitor["hud_canvas"] = None
+        monitor["hud_items"] = []
+
+    def _reset_peaks() -> None:
+        with monitor["lock"]:
+            monitor["peak"] = 0.0
+            monitor["peaks"] = [0.0 for _ in monitor["peaks"]]
+        _set_status("Peaks reset")
+
+    def _update_hud(levels: list[float], peaks: list[float], labels: list[str]) -> None:
+        canvas = monitor["hud_canvas"]
+        if canvas is None:
+            return
+        canvas.delete("all")
+        bar_w = 40
+        gap = 10
+        max_h = 120
+        for idx, level in enumerate(levels):
+            x0 = 10 + idx * (bar_w + gap)
+            x1 = x0 + bar_w
+            h = min(max_h, int(level * max_h))
+            if level < 0.6:
+                color = "lime"
+            elif level < 0.85:
+                color = "yellow"
+            else:
+                color = "red"
+            canvas.create_rectangle(
+                x0, 10 + (max_h - h), x1, 10 + max_h, fill=color
+            )
+            if idx < len(peaks):
+                ph = min(max_h, int(peaks[idx] * max_h))
+                canvas.create_line(
+                    x0, 10 + (max_h - ph), x1, 10 + (max_h - ph), fill="red"
+                )
+            label = labels[idx] if idx < len(labels) else f"ch{idx+1}"
+            canvas.create_text(
+                x0 + bar_w / 2, 10 + max_h + 12, text=label, fill="white"
+            )
     def _start_recording(context_type: str) -> None:
         if state["recording"]:
             return
@@ -495,6 +588,9 @@ def launch_gui() -> None:
     ttk.Entry(main, textvariable=system_device_var, width=20).grid(
         row=9, column=1, sticky="w"
     )
+    ttk.Label(main, text="Route app audio to this device").grid(
+        row=9, column=2, columnspan=2, sticky="w"
+    )
     ttk.Label(main, text="Rate").grid(row=9, column=2, sticky="w")
     rate_var = tk.StringVar(value=str(config.audio.sample_rate_hz))
     ttk.Entry(main, textvariable=rate_var, width=8).grid(
@@ -585,6 +681,12 @@ def launch_gui() -> None:
     )
     ttk.Button(main, text="Monitor", command=_toggle_monitor).grid(
         row=17, column=2, sticky="w", pady=(6, 0)
+    )
+    ttk.Button(main, text="HUD", command=_open_hud).grid(
+        row=17, column=4, sticky="w", pady=(6, 0)
+    )
+    ttk.Button(main, text="Reset Peaks", command=_reset_peaks).grid(
+        row=17, column=5, sticky="w", pady=(6, 0)
     )
     meter_var = tk.IntVar(value=0)
     ttk.Progressbar(main, maximum=100, variable=meter_var, length=120).grid(
