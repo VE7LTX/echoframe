@@ -53,7 +53,7 @@ python -m echoframe.cli gui
 - dual: record mic + system audio together (separate tracks).
 
 System audio isolation (no virtual cable):
-1) Windows Settings → System → Sound → App volume and device preferences.
+1) Windows Settings > System > Sound > App volume and device preferences.
 2) Route Zoom/Teams/Meet to the output device you enter in EchoFrame.
 3) Use Capture: system or dual.
 
