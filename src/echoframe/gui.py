@@ -613,6 +613,7 @@ def launch_gui() -> None:
         debug_enabled_var.set(True)
         config.context["debug_logging"] = True
         save_config(config_path, config)
+        _update_debug_badge()
         _set_status("Debug logging enabled")
 
     def _toggle_debug() -> None:
@@ -621,6 +622,7 @@ def launch_gui() -> None:
         logger.setLevel(logging.DEBUG if enabled else logging.INFO)
         config.context["debug_logging"] = enabled
         save_config(config_path, config)
+        _update_debug_badge()
         _set_status("Debug logging enabled" if enabled else "Debug logging disabled")
 
     dev_menu.add_command(label="View Log", command=_open_log_viewer)
@@ -890,10 +892,19 @@ def launch_gui() -> None:
 
     status_var = tk.StringVar(value="Idle")
     ttk.Label(main, textvariable=status_var).grid(
-        row=20, column=0, columnspan=5, sticky="w", pady=(6, 0)
+        row=20, column=0, columnspan=4, sticky="w", pady=(6, 0)
     )
 
     debug_enabled_var = tk.BooleanVar(value=debug_enabled)
+    debug_badge = ttk.Label(main, text="DEBUG", foreground="red")
+    if debug_enabled_var.get():
+        debug_badge.grid(row=20, column=4, sticky="e", pady=(6, 0))
+
+    def _update_debug_badge() -> None:
+        if debug_enabled_var.get():
+            debug_badge.grid(row=20, column=4, sticky="e", pady=(6, 0))
+        else:
+            debug_badge.grid_forget()
 
     def _bind_preset_updates() -> None:
         org_combo.bind(
