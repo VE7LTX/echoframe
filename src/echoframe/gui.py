@@ -16,6 +16,8 @@ from .storage import build_session_basename, ensure_dir, ensure_structure, get_o
 from .transcriber import transcribe_audio
 from .logging_utils import setup_logging
 from .audio_utils import extract_channels
+from .models import Session
+from .session_io import save_segments, save_session
 
 
 def launch_gui() -> None:
@@ -454,6 +456,30 @@ def launch_gui() -> None:
             note_path = os.path.join(notes_dir, f"{basename}.md")
             with open(note_path, "w", encoding="utf-8") as handle:
                 handle.write(note_text)
+
+            segments_path = os.path.join(paths["segments"], f"{basename}.segments.json")
+            session_path = os.path.join(paths["sessions"], f"{basename}.session.json")
+            save_segments(segments_path, segments)
+            session = Session(
+                session_id=basename,
+                title=title,
+                started_at=date_str,
+                duration_seconds=record_result.duration_seconds,
+                audio_path=output_path,
+                segments=segments,
+                note_path=note_path,
+                ai_summary=None,
+                ai_sentiment=None,
+                context_type=context_type,
+                contact_name=contact_var.get().strip() or None,
+                contact_id=contact_id_var.get().strip() or None,
+                organization=org_var.get().strip() or None,
+                project=project_var.get().strip() or None,
+                location=location_var.get().strip() or None,
+                channel=channel_var.get().strip() or None,
+                context_notes=notes_box.get("1.0", "end").strip() or None,
+            )
+            save_session(session_path, session)
 
             _set_status(f"Saved: {note_path}")
             logger.info("Note saved: %s", note_path)

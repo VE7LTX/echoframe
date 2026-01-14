@@ -19,7 +19,7 @@ schema: 1
 - [x] Use `base_dir` for output paths in GUI and CLI (Recordings/Notes)
 - [x] Emit capture metadata in notes (capture_mode, mic/system devices, channel_map)
 - [x] Ensure transcription/diarization use mic-only channels in dual-track mode
-- [ ] Session metadata persistence (session.json, segments.json)
+- [x] Session metadata persistence (session.json, segments.json)
 - [x] Implement folder structure creation (Recordings/Notes/Segments/Sessions/Logs)
 - [x] Optional category subfolders (by context_type)
 
