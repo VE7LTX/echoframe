@@ -7,7 +7,6 @@ import os
 import queue
 import threading
 import time
-from collections import deque
 from datetime import datetime
 
 from .config import Config, load_config, save_config
@@ -213,7 +212,10 @@ def launch_gui() -> None:
         "hud": None,
         "hud_canvas": None,
         "config": None,
-        "waveform": deque(maxlen=2048),
+        "waveform": [],
+        "last_update": 0.0,
+        "update_count": 0,
+        "last_log": 0.0,
     }
     live = {
         "audio_queue": None,
@@ -467,6 +469,9 @@ def launch_gui() -> None:
             channels = list(monitor["channels"])
             peaks = list(monitor["peaks"])
             labels = list(monitor["labels"])
+            last_update = monitor["last_update"]
+            update_count = monitor["update_count"]
+            last_log = monitor["last_log"]
         if not channels and level > 0:
             channels = [level]
             peaks = [peak]
@@ -476,6 +481,19 @@ def launch_gui() -> None:
         _render_meters(channels, peaks, labels)
         if monitor["hud_canvas"] is not None:
             _update_hud(channels, peaks, labels)
+        if debug_enabled_var.get():
+            now = time.time()
+            if now - last_log >= 2.0:
+                logger.debug(
+                    "Meter updates=%s last_update=%.2f level=%.2f peak=%.2f channels=%s",
+                    update_count,
+                    now - last_update if last_update else -1,
+                    level,
+                    peak,
+                    len(channels),
+                )
+                with monitor["lock"]:
+                    monitor["last_log"] = now
         root.after(200, _update_meter)
 
     monitor_refresh_job = None
@@ -539,7 +557,7 @@ def launch_gui() -> None:
             channel_rms = (
                 (data**2).mean(axis=0) ** 0.5 if data.ndim == 2 else [rms]
             )
-            if monitor["waveform"] is not None:
+            if state["recording"]:
                 mono = (
                     data_scaled.mean(axis=1)
                     if data_scaled.ndim == 2
@@ -561,6 +579,8 @@ def launch_gui() -> None:
                     monitor["peaks"][idx] = max(monitor["peaks"][idx], float(value))
                 monitor["level"] = max(monitor["channels"], default=0.0)
                 monitor["peak"] = max(monitor["peaks"], default=0.0)
+                monitor["last_update"] = time.time()
+                monitor["update_count"] += 1
 
         mode = capture_mode_var.get().strip()
         try:
@@ -606,12 +626,12 @@ def launch_gui() -> None:
 
                 def _cb_mic(indata, _frames, _time, status):
                     if status:
-                        return
+                        logger.debug("Monitor mic status: %s", status)
                     _update_levels(0, indata)
 
                 def _cb_sys(indata, _frames, _time, status):
                     if status:
-                        return
+                        logger.debug("Monitor system status: %s", status)
                     _update_levels(mic_channels, indata)
 
                 sys_settings = None
@@ -680,7 +700,7 @@ def launch_gui() -> None:
 
                 def _cb(indata, _frames, _time, status):
                     if status:
-                        return
+                        logger.debug("Monitor status: %s", status)
                     _update_levels(0, indata)
 
                 extra_settings = None
@@ -1100,6 +1120,8 @@ def launch_gui() -> None:
         state["stop_event"].clear()
         timer_var.set("00:00")
         state["timestamped_notes"] = []
+        with monitor["lock"]:
+            monitor["waveform"] = []
         _refresh_timestamped_notes()
         _set_status(f"Recording ({context_type})...")
         _save_last_used()
@@ -1215,26 +1237,25 @@ def launch_gui() -> None:
                 if segments:
                     _set_status("Final transcription ready")
 
-                if diarize_var.get():
-                    _set_status("Diarizing...")
-                    transcribe["progress_queue"].put("diarize_start")
-                    try:
-                        speaker_map = {}
-                        for pair in speaker_map_var.get().split(","):
-                            if ":" in pair:
-                                k, v = pair.split(":", 1)
-                                speaker_map[k.strip()] = v.strip()
-                        segments = diarize_segments(
-                            transcribe_path,
-                            segments,
-                            speaker_map=speaker_map or None,
-                            hf_token=hf_token_var.get().strip() or None,
-                        )
-                        _set_status("Diarization complete")
-                        transcribe["progress_queue"].put("diarize_done")
-                    except Exception as exc:
-                        logger.exception("Diarization failed")
-                        _set_status(f"Diarization failed: {exc}")
+                _set_status("Diarizing...")
+                transcribe["progress_queue"].put("diarize_start")
+                try:
+                    speaker_map = {}
+                    for pair in speaker_map_var.get().split(","):
+                        if ":" in pair:
+                            k, v = pair.split(":", 1)
+                            speaker_map[k.strip()] = v.strip()
+                    segments = diarize_segments(
+                        transcribe_path,
+                        segments,
+                        speaker_map=speaker_map or None,
+                        hf_token=hf_token_var.get().strip() or None,
+                    )
+                    _set_status("Diarization complete")
+                    transcribe["progress_queue"].put("diarize_done")
+                except Exception as exc:
+                    logger.exception("Diarization failed")
+                    _set_status(f"Diarization failed: {exc}")
 
                 title = title_var.get().strip() or context_type
                 date_str = datetime.now().strftime("%Y-%m-%d")
@@ -1347,6 +1368,28 @@ def launch_gui() -> None:
         _stop_live_transcriber()
         _save_last_used()
         _set_status("Stopping...")
+
+    def _close_contact() -> None:
+        if state["recording"]:
+            proceed = messagebox.askyesno(
+                "Close contact",
+                "Stop recording and close this contact file?",
+            )
+            if not proceed:
+                return
+            state["suppress_contact_prompt"] = True
+            _stop_recording()
+        else:
+            state["suppress_contact_prompt"] = True
+        state["active_contact"] = ""
+        state["pending_contact"] = ""
+        contact_var.set("")
+        contact_id_var.set("")
+        state["timestamped_notes"] = []
+        _refresh_timestamped_notes()
+        _update_note_controls()
+        state["suppress_contact_prompt"] = False
+        _set_status("Contact closed. Ready for next contact.")
 
     def _start_custom() -> None:
         context_type = context_type_var.get().strip() or "Session"
@@ -1768,10 +1811,11 @@ def launch_gui() -> None:
         )
         _ToolTip(frame.winfo_children()[-1], "Compute precision (int8/float16).")
 
-        ttk.Checkbutton(frame, text="Diarize", variable=diarize_var).grid(
-            row=4, column=0, columnspan=2, sticky="w"
+        diarize_cb = ttk.Checkbutton(
+            frame, text="Diarize", variable=diarize_var, state="disabled"
         )
-        _ToolTip(frame.winfo_children()[-1], "Run speaker diarization after transcription.")
+        diarize_cb.grid(row=4, column=0, columnspan=2, sticky="w")
+        _ToolTip(diarize_cb, "Always on: speaker diarization runs after transcription.")
 
         ttk.Label(frame, text="HF token").grid(row=5, column=0, sticky="w")
         ttk.Entry(frame, textvariable=hf_token_var, width=32, show="*").grid(
@@ -2220,7 +2264,7 @@ def launch_gui() -> None:
     language_var = tk.StringVar(value=_last_used_value("language", ""))
     device_pref_var = tk.StringVar(value=_last_used_value("device_pref", ""))
     compute_type_var = tk.StringVar(value=_last_used_value("compute_type", ""))
-    diarize_var = tk.BooleanVar(value=bool(last_used.get("diarize", False)))
+    diarize_var = tk.BooleanVar(value=True)
     hf_token_var = tk.StringVar(value=_last_used_value("hf_token", ""))
     speaker_map_var = tk.StringVar(value=_last_used_value("speaker_map", ""))
     use_type_folders_var = tk.BooleanVar(
@@ -2429,17 +2473,21 @@ def launch_gui() -> None:
     ttk.Button(control_row, text="Stop", command=_stop_recording).grid(
         row=0, column=1, padx=2
     )
-    ttk.Button(control_row, text="Clear", command=_clear_fields).grid(
+    ttk.Button(control_row, text="Close Contact", command=_close_contact).grid(
         row=0, column=2, padx=2
     )
-    ttk.Button(control_row, text="Reset Peaks", command=_reset_peaks).grid(
+    ttk.Button(control_row, text="Clear", command=_clear_fields).grid(
         row=0, column=3, padx=2
+    )
+    ttk.Button(control_row, text="Reset Peaks", command=_reset_peaks).grid(
+        row=0, column=4, padx=2
     )
     buttons = control_row.winfo_children()
     _ToolTip(buttons[0], "Start recording with current metadata.")
     _ToolTip(buttons[1], "Stop recording and begin transcription.")
-    _ToolTip(buttons[2], "Clear metadata fields (keeps defaults).")
-    _ToolTip(buttons[3], "Reset peak hold indicators.")
+    _ToolTip(buttons[2], "Close the current contact and prepare for the next.")
+    _ToolTip(buttons[3], "Clear metadata fields (keeps defaults).")
+    _ToolTip(buttons[4], "Reset peak hold indicators.")
 
     def _add_timestamped_note(_event=None) -> None:
         if not contact_var.get().strip():

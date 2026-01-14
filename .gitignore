@@ -42,3 +42,8 @@ whisper/
 # OS
 .DS_Store
 Thumbs.db
+# Local user data
+Segments/
+Sessions/
+echoframe_config.yml
+Screenshot *.png
