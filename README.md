@@ -1,22 +1,3 @@
----
-title: EchoFrame
-type: overview
-status: draft
-created: 2026-01-13
-updated: 2026-01-13
-owner: Matt Schafer VE7LTX
-purpose: Project intent, scope, architecture, dependencies, and roadmap.
-scope: Repository-wide
-audience: Maintainers, contributors, and users
-related:
-  - AGENTS.md
-  - CONTRIBUTING.md
-  - SECURITY.md
-  - docs/frontmatter-schema.md
-  - docs/implementation-plan.md
-  - LICENSE
-schema: 1
----
 # EchoFrame
 
 EchoFrame is a local personal research assistant for capturing audio, transcribing it offline, and emitting structured Markdown notes for Obsidian. It is optimized for research work: interviews, client calls, internal meetings, and fieldwork. Personal.ai integration is optional and text-only.
