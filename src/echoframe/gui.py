@@ -294,6 +294,19 @@ def launch_gui() -> None:
                 x0 + bar_w / 2, 10 + max_h + 12, text=f"ch{idx+1}", fill="white"
             )
 
+    def _build_channel_map(mode: str) -> list[str]:
+        mic_count = int(mic_channels_var.get())
+        sys_count = int(system_channels_var.get())
+        mic_labels = ["front_left", "front_right", "rear_left", "rear_right"][:mic_count]
+        sys_labels = ["system_left", "system_right", "system_rl", "system_rr"][
+            :sys_count
+        ]
+        if mode == "dual":
+            return mic_labels + sys_labels
+        if mode == "system":
+            return sys_labels
+        return mic_labels
+
     def _start_recording(context_type: str) -> None:
         if state["recording"]:
             return
@@ -302,7 +315,6 @@ def launch_gui() -> None:
         state["stop_event"].clear()
         timer_var.set("00:00")
         _set_status(f"Recording ({context_type})...")
-        logger.info("Start recording: %s", output_path)
 
         title = title_var.get().strip() or context_type
         paths = get_output_dirs(
@@ -313,6 +325,7 @@ def launch_gui() -> None:
         out_dir = paths["recordings"]
         basename = build_session_basename(title, datetime.now())
         output_path = os.path.join(out_dir, f"{basename}.wav")
+        logger.info("Start recording: %s", output_path)
 
         def _worker() -> None:
             mode = capture_mode_var.get()
@@ -408,6 +421,11 @@ def launch_gui() -> None:
                     if mode != "system"
                     else system_channels_var.get()
                 ),
+                capture_mode=mode,
+                mic_device=mic_device_var.get().strip() or None,
+                system_device=system_device_var.get().strip() or None,
+                system_channels=int(system_channels_var.get()),
+                channel_map=_build_channel_map(mode),
                 context_type=context_type,
                 contact_name=contact_var.get().strip() or None,
                 contact_id=contact_id_var.get().strip() or None,

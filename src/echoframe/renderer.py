@@ -20,6 +20,11 @@ def render_note(
     sample_rate_hz: Optional[int] = None,
     bit_depth: Optional[int] = None,
     channels: Optional[int] = None,
+    capture_mode: Optional[str] = None,
+    mic_device: Optional[str] = None,
+    system_device: Optional[str] = None,
+    system_channels: Optional[int] = None,
+    channel_map: Optional[List[str]] = None,
     context_type: Optional[str] = None,
     contact_name: Optional[str] = None,
     contact_id: Optional[str] = None,
@@ -53,6 +58,18 @@ def render_note(
         lines.append(f"bit_depth: {bit_depth}")
     if channels:
         lines.append(f"channels: {channels}")
+    if capture_mode:
+        lines.append(f"capture_mode: {capture_mode}")
+    if mic_device:
+        lines.append(f"mic_device: {mic_device}")
+    if system_device:
+        lines.append(f"system_device: {system_device}")
+    if system_channels:
+        lines.append(f"system_channels: {system_channels}")
+    if channel_map:
+        lines.append("channel_map:")
+        for label in channel_map:
+            lines.append(f"  - {label}")
     if context_type:
         lines.append(f"context_type: {context_type}")
     if contact_name:
