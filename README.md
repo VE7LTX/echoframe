@@ -29,6 +29,14 @@ Primary goal: live local transcription and speaker diarization, fully offline by
 - Provide canonical links to operational docs and schema standards.
 
 ## Relationships
+- [AGENTS](AGENTS.md)
+- [CONTRIBUTING](CONTRIBUTING.md)
+- [SECURITY](SECURITY.md)
+- [Frontmatter Schema](docs/frontmatter-schema.md)
+- [Implementation Plan](docs/implementation-plan.md)
+- [LICENSE](LICENSE)
+
+## Relationships (Obsidian)
 - [[AGENTS]]
 - [[CONTRIBUTING]]
 - [[SECURITY]]
@@ -37,20 +45,22 @@ Primary goal: live local transcription and speaker diarization, fully offline by
 - [[LICENSE]]
 
 ## Implementation plan index
-- [[docs/implementation-plan#System overview]]
-- [[docs/implementation-plan#User requirements]]
-- [[docs/implementation-plan#File and folder structure]]
-- [[docs/implementation-plan#Audio handling and capture]]
-- [[docs/implementation-plan#Transcription pipeline]]
-- [[docs/implementation-plan#Diarization strategy (optional)]]
-- [[docs/implementation-plan#Personal.ai integration]]
-- [[docs/implementation-plan#Obsidian output formatting]]
-- [[docs/implementation-plan#CLI and automation workflow]]
-- [[docs/implementation-plan#Architecture (planned)]]
-- [[docs/implementation-plan#Open source dependencies (planned)]]
-- [[docs/implementation-plan#Local installation and packaging considerations]]
-- [[docs/implementation-plan#Future features and stretch goals]]
-- [[docs/implementation-plan#Sources]]
+- [System overview](docs/implementation-plan.md#system-overview)
+- [User requirements](docs/implementation-plan.md#user-requirements)
+- [File and folder structure](docs/implementation-plan.md#file-and-folder-structure)
+- [Config specification](docs/implementation-plan.md#config-specification)
+- [Audio handling and capture](docs/implementation-plan.md#audio-handling-and-capture)
+- [Transcription pipeline](docs/implementation-plan.md#transcription-pipeline)
+- [Diarization strategy (optional)](docs/implementation-plan.md#diarization-strategy-optional)
+- [Personal.ai integration](docs/implementation-plan.md#personalai-integration)
+- [Obsidian output formatting](docs/implementation-plan.md#obsidian-output-formatting)
+- [CLI and automation workflow](docs/implementation-plan.md#cli-and-automation-workflow)
+- [GUI approach (basic)](docs/implementation-plan.md#gui-approach-basic)
+- [Architecture (planned)](docs/implementation-plan.md#architecture-planned)
+- [Open source dependencies (planned)](docs/implementation-plan.md#open-source-dependencies-planned)
+- [Local installation and packaging considerations](docs/implementation-plan.md#local-installation-and-packaging-considerations)
+- [Future features and stretch goals](docs/implementation-plan.md#future-features-and-stretch-goals)
+- [Sources](docs/implementation-plan.md#sources)
 
 ## Status
 Planning and design phase. No working code yet.
@@ -290,4 +300,4 @@ Packaging and install:
 - The Sweet Setup: Obsidian YAML and Dataview
 
 ## License
-MIT. See [[LICENSE]].
+MIT. See [LICENSE](LICENSE).
