@@ -38,7 +38,11 @@ def launch_gui() -> None:
         config = Config(base_dir="")
 
     base_paths = ensure_structure(config.base_dir)
-    logger, log_path = setup_logging(log_dir=base_paths["logs"])
+    debug_enabled = bool(config.context.get("debug_logging", True))
+    logger, log_path = setup_logging(
+        log_dir=base_paths["logs"],
+        level=logging.DEBUG if debug_enabled else logging.INFO,
+    )
 
     presets = {
         "context_types": config.context.get(
@@ -153,6 +157,7 @@ def launch_gui() -> None:
         config.context["default_context_type"] = context_type_var.get().strip()
         config.context["default_channel"] = channel_var.get().strip()
         config.context["use_type_folders"] = use_type_folders_var.get()
+        config.context["debug_logging"] = debug_enabled_var.get()
         save_config(config_path, config)
         _set_status("Defaults saved")
 
@@ -219,13 +224,20 @@ def launch_gui() -> None:
             if mode == "system"
             else mic_device_var.get().strip()
         )
-        monitor_channels = (
+        requested_channels = (
             int(system_channels_var.get())
             if mode == "system"
             else int(mic_channels_var.get())
         )
         extra_settings = None
         try:
+            dev_info = sd.query_devices(monitor_device or None, "input")
+            max_in = dev_info.get("max_input_channels", 0)
+            monitor_channels = min(requested_channels, max_in) if max_in else 1
+            if monitor_channels != requested_channels:
+                _set_status(
+                    f"Monitor channels adjusted to {monitor_channels} (max {max_in})"
+                )
             if mode == "system" and hasattr(sd, "WasapiSettings"):
                 extra_settings = sd.WasapiSettings(loopback=True)
             stream = sd.InputStream(
@@ -598,11 +610,23 @@ def launch_gui() -> None:
 
     def _enable_debug() -> None:
         logger.setLevel(logging.DEBUG)
+        debug_enabled_var.set(True)
+        config.context["debug_logging"] = True
+        save_config(config_path, config)
         _set_status("Debug logging enabled")
+
+    def _toggle_debug() -> None:
+        enabled = not debug_enabled_var.get()
+        debug_enabled_var.set(enabled)
+        logger.setLevel(logging.DEBUG if enabled else logging.INFO)
+        config.context["debug_logging"] = enabled
+        save_config(config_path, config)
+        _set_status("Debug logging enabled" if enabled else "Debug logging disabled")
 
     dev_menu.add_command(label="View Log", command=_open_log_viewer)
     dev_menu.add_command(label="Open Log Folder", command=_open_log_folder)
     dev_menu.add_command(label="Enable Debug Logging", command=_enable_debug)
+    dev_menu.add_command(label="Toggle Debug Logging", command=_toggle_debug)
 
     main = ttk.Frame(root, padding=8)
     main.grid(row=0, column=0, sticky="nsew")
@@ -868,6 +892,8 @@ def launch_gui() -> None:
     ttk.Label(main, textvariable=status_var).grid(
         row=20, column=0, columnspan=5, sticky="w", pady=(6, 0)
     )
+
+    debug_enabled_var = tk.BooleanVar(value=debug_enabled)
 
     def _bind_preset_updates() -> None:
         org_combo.bind(
