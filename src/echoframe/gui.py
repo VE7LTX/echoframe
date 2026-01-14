@@ -1969,6 +1969,7 @@ def launch_gui() -> None:
                 total_samples = 0
                 peak = 0.0
                 clipped = 0
+                chunks = []
 
                 def _callback(indata, frames, _time, status):
                     nonlocal frames_seen, sum_squares, total_samples, peak, clipped
@@ -1980,6 +1981,7 @@ def launch_gui() -> None:
                     sum_squares += float((data**2).sum())
                     total_samples += data.size
                     clipped += int((abs(data) >= 32760).sum())
+                    chunks.append(data.copy())
 
                 try:
                     with sd.InputStream(
@@ -2022,12 +2024,51 @@ def launch_gui() -> None:
                 else:
                     verdict = "Good level for transcription."
 
+                root.after(0, lambda: status_var.set("Transcribing sample..."))
+                transcript_text = ""
+                try:
+                    import tempfile
+                    import wave
+
+                    audio = np.concatenate(chunks, axis=0) if chunks else None
+                    if audio is not None and audio.size:
+                        with tempfile.NamedTemporaryFile(
+                            suffix=".wav", delete=False
+                        ) as tmp:
+                            tmp_path = tmp.name
+                        with wave.open(tmp_path, "wb") as handle:
+                            handle.setnchannels(channels)
+                            handle.setsampwidth(2)
+                            handle.setframerate(sample_rate)
+                            handle.writeframes(audio.astype("int16").tobytes())
+                        segments = transcribe_audio(
+                            tmp_path,
+                            model_name=model_var.get().strip() or "small",
+                            language=language_var.get().strip() or None,
+                            device=device_pref_var.get().strip() or None,
+                            compute_type=compute_type_var.get().strip() or None,
+                        )
+                        transcript_text = " ".join(
+                            seg.text.strip() for seg in segments if seg.text.strip()
+                        )
+                except Exception as exc:
+                    transcript_text = f"(transcription failed: {exc})"
+                finally:
+                    try:
+                        if "tmp_path" in locals() and os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+
                 def _finish() -> None:
                     status_var.set("Level check complete.")
-                    result_var.set(
+                    details = (
                         f"RMS {rms_db:.1f} dBFS, Peak {peak_db:.1f} dBFS, "
                         f"Clipped {clip_ratio:.2%}. {verdict}"
                     )
+                    if transcript_text:
+                        details = f"{details}\nTranscript: {transcript_text}"
+                    result_var.set(details)
                     running["active"] = False
 
                 root.after(0, _finish)

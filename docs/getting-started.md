@@ -55,7 +55,7 @@ python -m echoframe.cli gui
 2) Settings > Manage lists: add orgs, projects, channels, tags, and profiles.
 3) Settings > Audio settings: pick the mic device (Zoom H2/H4).
 4) Settings > Transcription settings: set final and live models.
-5) Settings > Mic setup wizard: run the level check and adjust mic gain.
+5) Settings > Mic setup wizard: run the level check and confirm the transcript sample.
 6) Live waveform starts automatically.
 7) Timestamped notes require a Contact value.
 
