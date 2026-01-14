@@ -36,6 +36,11 @@ Thanks for your interest in EchoFrame.
 - Open an issue describing your proposal or bug.
 - For substantial changes, outline the plan before starting work.
 
+## Current scope
+- Windows-first support with WASAPI loopback for system audio.
+- Tkinter GUI bar plus CLI utilities.
+- Local transcription and optional diarization; Personal.ai is text-only.
+
 ## Development standards
 - Keep changes focused and minimal.
 - Update README.md when behavior or scope changes.

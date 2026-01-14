@@ -89,9 +89,39 @@ def launch_gui() -> None:
         "peaks": [],
         "hud": None,
         "hud_canvas": None,
-        "hud_items": [],
-        "labels": [],
     }
+
+    class _ToolTip:
+        def __init__(self, widget, text: str) -> None:
+            self.widget = widget
+            self.text = text
+            self.tip = None
+            widget.bind("<Enter>", self._show)
+            widget.bind("<Leave>", self._hide)
+
+        def _show(self, _event=None) -> None:
+            if self.tip or not self.text:
+                return
+            x = self.widget.winfo_rootx() + 20
+            y = self.widget.winfo_rooty() + 20
+            self.tip = tk.Toplevel(self.widget)
+            self.tip.wm_overrideredirect(True)
+            self.tip.wm_geometry(f"+{x}+{y}")
+            label = tk.Label(
+                self.tip,
+                text=self.text,
+                background="#ffffe0",
+                relief="solid",
+                borderwidth=1,
+                font=("Segoe UI", 9),
+                justify="left",
+            )
+            label.pack(ipadx=4, ipady=2)
+
+        def _hide(self, _event=None) -> None:
+            if self.tip:
+                self.tip.destroy()
+                self.tip = None
 
     def _set_status(text: str) -> None:
         status_var.set(text)
@@ -129,12 +159,11 @@ def launch_gui() -> None:
             peak = monitor["peak"]
             channels = list(monitor["channels"])
             peaks = list(monitor["peaks"])
-            labels = list(monitor["labels"])
         meter_var.set(min(100, int(level * 100)))
         level_var.set(f"{level:.2f}")
         peak_var.set(f"{peak:.2f}")
         if monitor["hud_canvas"] is not None:
-            _update_hud(channels, peaks, labels)
+            _update_hud(channels, peaks)
         root.after(200, _update_meter)
 
     def _toggle_monitor() -> None:
@@ -159,16 +188,14 @@ def launch_gui() -> None:
             if status:
                 return
             data = indata.astype("float32")
-            rms = float(np.sqrt(np.mean(data ** 2)))
+            rms = float((data**2).mean() ** 0.5)
             channel_rms = (
-                np.sqrt(np.mean(data ** 2, axis=0)).tolist()
-                if data.ndim == 2
-                else [rms]
+                (data**2).mean(axis=0) ** 0.5 if data.ndim == 2 else [rms]
             )
             with monitor["lock"]:
                 monitor["level"] = rms
                 monitor["peak"] = max(monitor["peak"], rms)
-                monitor["channels"] = channel_rms
+                monitor["channels"] = list(channel_rms)
                 if not monitor["peaks"] or len(monitor["peaks"]) != len(channel_rms):
                     monitor["peaks"] = [0.0] * len(channel_rms)
                 monitor["peaks"] = [
@@ -186,7 +213,6 @@ def launch_gui() -> None:
             if mode == "system"
             else int(mic_channels_var.get())
         )
-        monitor["labels"] = _channel_labels(mode)
         extra_settings = None
         try:
             if mode == "system" and hasattr(sd, "WasapiSettings"):
@@ -205,19 +231,6 @@ def launch_gui() -> None:
         except Exception as exc:
             _set_status(f"Monitor failed: {exc}")
 
-    def _channel_labels(mode: str) -> list[str]:
-        mic_count = int(mic_channels_var.get())
-        sys_count = int(system_channels_var.get())
-        mic_labels = ["front_left", "front_right", "rear_left", "rear_right"][:mic_count]
-        sys_labels = ["system_left", "system_right", "system_rl", "system_rr"][
-            :sys_count
-        ]
-        if mode == "dual":
-            return mic_labels + sys_labels
-        if mode == "system":
-            return sys_labels
-        return mic_labels
-
     def _open_hud() -> None:
         if monitor["hud"] is not None:
             return
@@ -228,7 +241,6 @@ def launch_gui() -> None:
         canvas.grid(row=0, column=0, padx=6, pady=6)
         monitor["hud"] = hud
         monitor["hud_canvas"] = canvas
-        monitor["hud_items"] = []
         hud.protocol("WM_DELETE_WINDOW", _close_hud)
 
     def _close_hud() -> None:
@@ -236,7 +248,6 @@ def launch_gui() -> None:
             monitor["hud"].destroy()
         monitor["hud"] = None
         monitor["hud_canvas"] = None
-        monitor["hud_items"] = []
 
     def _reset_peaks() -> None:
         with monitor["lock"]:
@@ -244,7 +255,7 @@ def launch_gui() -> None:
             monitor["peaks"] = [0.0 for _ in monitor["peaks"]]
         _set_status("Peaks reset")
 
-    def _update_hud(levels: list[float], peaks: list[float], labels: list[str]) -> None:
+    def _update_hud(levels: list[float], peaks: list[float]) -> None:
         canvas = monitor["hud_canvas"]
         if canvas is None:
             return
@@ -270,10 +281,10 @@ def launch_gui() -> None:
                 canvas.create_line(
                     x0, 10 + (max_h - ph), x1, 10 + (max_h - ph), fill="red"
                 )
-            label = labels[idx] if idx < len(labels) else f"ch{idx+1}"
             canvas.create_text(
-                x0 + bar_w / 2, 10 + max_h + 12, text=label, fill="white"
+                x0 + bar_w / 2, 10 + max_h + 12, text=f"ch{idx+1}", fill="white"
             )
+
     def _start_recording(context_type: str) -> None:
         if state["recording"]:
             return
@@ -473,75 +484,85 @@ def launch_gui() -> None:
     main = ttk.Frame(root, padding=8)
     main.grid(row=0, column=0, sticky="nsew")
 
-    ttk.Label(main, text="Title").grid(row=0, column=0, sticky="w")
+    ttk.Label(
+        main,
+        text="EchoFrame setup: fill context, pick capture mode, then Start.",
+    ).grid(row=0, column=0, columnspan=5, sticky="w", pady=(0, 6))
+
+    ttk.Label(main, text="Title").grid(row=1, column=0, sticky="w")
     title_var = tk.StringVar()
-    ttk.Entry(main, textvariable=title_var, width=36).grid(
-        row=0, column=1, columnspan=4, sticky="w"
-    )
+    title_entry = ttk.Entry(main, textvariable=title_var, width=36)
+    title_entry.grid(row=1, column=1, columnspan=4, sticky="w")
+    _ToolTip(title_entry, "Session title used in filenames and notes.")
 
-    ttk.Label(main, text="Your name").grid(row=1, column=0, sticky="w")
+    ttk.Label(main, text="Your name").grid(row=2, column=0, sticky="w")
     user_name_var = tk.StringVar(value=config.context.get("user_name", ""))
-    ttk.Entry(main, textvariable=user_name_var, width=20).grid(
-        row=1, column=1, sticky="w"
-    )
-    ttk.Label(main, text="Attendees").grid(row=1, column=2, sticky="w")
+    user_name_entry = ttk.Entry(main, textvariable=user_name_var, width=20)
+    user_name_entry.grid(row=2, column=1, sticky="w")
+    _ToolTip(user_name_entry, "Your name for participants metadata.")
+    ttk.Label(main, text="Attendees").grid(row=2, column=2, sticky="w")
     attendees_var = tk.StringVar()
-    ttk.Entry(main, textvariable=attendees_var, width=18).grid(
-        row=1, column=3, sticky="w"
-    )
+    attendees_entry = ttk.Entry(main, textvariable=attendees_var, width=18)
+    attendees_entry.grid(row=2, column=3, sticky="w")
+    _ToolTip(attendees_entry, "Comma-separated list of other attendees.")
 
-    ttk.Label(main, text="Contact").grid(row=2, column=0, sticky="w")
+    ttk.Label(main, text="Contact").grid(row=3, column=0, sticky="w")
     contact_var = tk.StringVar()
-    ttk.Entry(main, textvariable=contact_var, width=20).grid(
-        row=2, column=1, sticky="w"
-    )
-    ttk.Label(main, text="ID").grid(row=2, column=2, sticky="w")
+    contact_entry = ttk.Entry(main, textvariable=contact_var, width=20)
+    contact_entry.grid(row=3, column=1, sticky="w")
+    _ToolTip(contact_entry, "Primary contact name for the session.")
+    ttk.Label(main, text="ID").grid(row=3, column=2, sticky="w")
     contact_id_var = tk.StringVar()
-    ttk.Entry(main, textvariable=contact_id_var, width=18).grid(
-        row=2, column=3, sticky="w"
-    )
+    contact_id_entry = ttk.Entry(main, textvariable=contact_id_var, width=18)
+    contact_id_entry.grid(row=3, column=3, sticky="w")
+    _ToolTip(contact_id_entry, "Internal contact ID or client ID.")
 
-    ttk.Label(main, text="Org").grid(row=3, column=0, sticky="w")
+    ttk.Label(main, text="Org").grid(row=4, column=0, sticky="w")
     org_var = tk.StringVar()
     org_combo = ttk.Combobox(
         main, textvariable=org_var, values=presets["organizations"], width=18
     )
-    org_combo.grid(row=3, column=1, sticky="w")
-    ttk.Label(main, text="Project").grid(row=3, column=2, sticky="w")
+    org_combo.grid(row=4, column=1, sticky="w")
+    _ToolTip(org_combo, "Organization or client company.")
+    ttk.Label(main, text="Project").grid(row=4, column=2, sticky="w")
     project_var = tk.StringVar()
     project_combo = ttk.Combobox(
         main, textvariable=project_var, values=presets["projects"], width=18
     )
-    project_combo.grid(row=3, column=3, sticky="w")
+    project_combo.grid(row=4, column=3, sticky="w")
+    _ToolTip(project_combo, "Project or research initiative.")
 
-    ttk.Label(main, text="Location").grid(row=4, column=0, sticky="w")
+    ttk.Label(main, text="Location").grid(row=5, column=0, sticky="w")
     location_var = tk.StringVar()
-    ttk.Entry(main, textvariable=location_var, width=20).grid(
-        row=4, column=1, sticky="w"
-    )
-    ttk.Label(main, text="Channel").grid(row=4, column=2, sticky="w")
+    location_entry = ttk.Entry(main, textvariable=location_var, width=20)
+    location_entry.grid(row=5, column=1, sticky="w")
+    _ToolTip(location_entry, "Physical location or meeting room.")
+    ttk.Label(main, text="Channel").grid(row=5, column=2, sticky="w")
     channel_var = tk.StringVar(
         value=config.context.get("default_channel", presets["channels"][0])
     )
     channel_combo = ttk.Combobox(
         main, textvariable=channel_var, values=presets["channels"], width=18
     )
-    channel_combo.grid(row=4, column=3, sticky="w")
+    channel_combo.grid(row=5, column=3, sticky="w")
+    _ToolTip(channel_combo, "How the session happened (in_person/phone/webchat).")
 
-    ttk.Label(main, text="Notes").grid(row=5, column=0, sticky="nw")
+    ttk.Label(main, text="Notes").grid(row=6, column=0, sticky="nw")
     notes_box = tk.Text(main, width=36, height=3)
-    notes_box.grid(row=5, column=1, columnspan=4, sticky="w")
+    notes_box.grid(row=6, column=1, columnspan=4, sticky="w")
+    _ToolTip(notes_box, "Context notes to compare against the transcript.")
 
-    ttk.Label(main, text="Tags").grid(row=6, column=0, sticky="w")
+    ttk.Label(main, text="Tags").grid(row=7, column=0, sticky="w")
     tags_var = tk.StringVar()
     tags_entry = ttk.Entry(main, textvariable=tags_var, width=20)
-    tags_entry.grid(row=6, column=1, sticky="w")
+    tags_entry.grid(row=7, column=1, sticky="w")
+    _ToolTip(tags_entry, "Comma-separated tags for Obsidian.")
     auto_tags_var = tk.BooleanVar(value=True)
-    ttk.Checkbutton(main, text="Auto tags", variable=auto_tags_var).grid(
-        row=6, column=2, sticky="w"
-    )
+    auto_tags_cb = ttk.Checkbutton(main, text="Auto tags", variable=auto_tags_var)
+    auto_tags_cb.grid(row=7, column=2, sticky="w")
+    _ToolTip(auto_tags_cb, "Auto-add context type and project.")
 
-    ttk.Label(main, text="Type").grid(row=6, column=3, sticky="w")
+    ttk.Label(main, text="Type").grid(row=7, column=3, sticky="w")
     context_type_var = tk.StringVar(
         value=config.context.get("default_context_type", presets["context_types"][0])
     )
@@ -551,9 +572,10 @@ def launch_gui() -> None:
         values=presets["context_types"],
         width=18,
     )
-    context_combo.grid(row=7, column=3, sticky="w")
+    context_combo.grid(row=8, column=3, sticky="w")
+    _ToolTip(context_combo, "Context type used in frontmatter.")
 
-    ttk.Label(main, text="Profile").grid(row=7, column=0, sticky="w")
+    ttk.Label(main, text="Profile").grid(row=8, column=0, sticky="w")
     profile_var = tk.StringVar()
     profile_combo = ttk.Combobox(
         main,
@@ -561,152 +583,158 @@ def launch_gui() -> None:
         values=[p.get("name") for p in presets["profiles"]],
         width=18,
     )
-    profile_combo.grid(row=7, column=1, sticky="w")
+    profile_combo.grid(row=8, column=1, sticky="w")
     profile_combo.bind("<<ComboboxSelected>>", _apply_profile)
     profile_name_var = tk.StringVar()
-    ttk.Entry(main, textvariable=profile_name_var, width=18).grid(
-        row=7, column=2, sticky="w"
-    )
+    profile_name_entry = ttk.Entry(main, textvariable=profile_name_var, width=18)
+    profile_name_entry.grid(row=8, column=2, sticky="w")
+    _ToolTip(profile_combo, "Load a preset of multiple fields.")
+    _ToolTip(profile_name_entry, "Name to save current fields as a profile.")
 
-    ttk.Label(main, text="Capture").grid(row=8, column=0, sticky="w")
+    ttk.Label(main, text="Capture").grid(row=9, column=0, sticky="w")
     capture_mode_var = tk.StringVar(value="mic")
-    ttk.Combobox(
+    capture_combo = ttk.Combobox(
         main,
         textvariable=capture_mode_var,
         values=["mic", "system", "dual"],
         width=10,
         state="readonly",
-    ).grid(row=8, column=1, sticky="w")
-    ttk.Label(main, text="Mic device").grid(row=8, column=2, sticky="w")
+    )
+    capture_combo.grid(row=9, column=1, sticky="w")
+    _ToolTip(capture_combo, "Mic/system/dual capture mode.")
+
+    ttk.Label(main, text="Mic device").grid(row=9, column=2, sticky="w")
     mic_device_var = tk.StringVar(value=config.device_name or "")
-    ttk.Entry(main, textvariable=mic_device_var, width=18).grid(
-        row=8, column=3, sticky="w"
-    )
+    mic_device_entry = ttk.Entry(main, textvariable=mic_device_var, width=18)
+    mic_device_entry.grid(row=9, column=3, sticky="w")
+    _ToolTip(mic_device_entry, "Mic device name substring (Zoom H2).")
 
-    ttk.Label(main, text="System device").grid(row=9, column=0, sticky="w")
+    ttk.Label(main, text="System device").grid(row=10, column=0, sticky="w")
     system_device_var = tk.StringVar()
-    ttk.Entry(main, textvariable=system_device_var, width=20).grid(
-        row=9, column=1, sticky="w"
-    )
-    ttk.Label(main, text="Route app audio to this device").grid(
-        row=9, column=2, columnspan=2, sticky="w"
-    )
-    ttk.Label(main, text="Rate").grid(row=9, column=2, sticky="w")
+    system_device_entry = ttk.Entry(main, textvariable=system_device_var, width=20)
+    system_device_entry.grid(row=10, column=1, sticky="w")
+    _ToolTip(system_device_entry, "Output device for app audio via loopback.")
+    ttk.Label(main, text="Rate").grid(row=10, column=2, sticky="w")
     rate_var = tk.StringVar(value=str(config.audio.sample_rate_hz))
-    ttk.Entry(main, textvariable=rate_var, width=8).grid(
-        row=9, column=3, sticky="w"
-    )
+    rate_entry = ttk.Entry(main, textvariable=rate_var, width=8)
+    rate_entry.grid(row=10, column=3, sticky="w")
+    _ToolTip(rate_entry, "Sample rate (44100 or 48000).")
 
-    ttk.Label(main, text="Mic channels").grid(row=10, column=0, sticky="w")
+    ttk.Label(main, text="Mic channels").grid(row=11, column=0, sticky="w")
     mic_channels_var = tk.StringVar(value=str(config.audio.channels))
-    ttk.Combobox(
+    mic_channels_combo = ttk.Combobox(
         main,
         textvariable=mic_channels_var,
         values=["1", "2", "4"],
         width=6,
-    ).grid(row=10, column=1, sticky="w")
-    ttk.Label(main, text="System channels").grid(row=10, column=2, sticky="w")
+    )
+    mic_channels_combo.grid(row=11, column=1, sticky="w")
+    _ToolTip(mic_channels_combo, "Mic input channels (H2 supports 4).")
+    ttk.Label(main, text="System channels").grid(row=11, column=2, sticky="w")
     system_channels_var = tk.StringVar(value="2")
-    ttk.Combobox(
+    system_channels_combo = ttk.Combobox(
         main,
         textvariable=system_channels_var,
         values=["1", "2", "4"],
         width=6,
-    ).grid(row=10, column=3, sticky="w")
+    )
+    system_channels_combo.grid(row=11, column=3, sticky="w")
+    _ToolTip(system_channels_combo, "System output channels for loopback.")
 
-    ttk.Label(main, text="Model").grid(row=11, column=0, sticky="w")
+    ttk.Label(main, text="Model").grid(row=12, column=0, sticky="w")
     model_var = tk.StringVar(value=config.whisper_model)
-    ttk.Entry(main, textvariable=model_var, width=8).grid(
-        row=11, column=1, sticky="w"
-    )
-    ttk.Label(main, text="Language").grid(row=11, column=2, sticky="w")
+    model_entry = ttk.Entry(main, textvariable=model_var, width=8)
+    model_entry.grid(row=12, column=1, sticky="w")
+    _ToolTip(model_entry, "Whisper model size (tiny/base/small/medium/large).")
+    ttk.Label(main, text="Language").grid(row=12, column=2, sticky="w")
     language_var = tk.StringVar()
-    ttk.Entry(main, textvariable=language_var, width=8).grid(
-        row=11, column=3, sticky="w"
-    )
+    language_entry = ttk.Entry(main, textvariable=language_var, width=8)
+    language_entry.grid(row=12, column=3, sticky="w")
+    _ToolTip(language_entry, "Optional language code (e.g., en).")
 
-    ttk.Label(main, text="Device pref").grid(row=12, column=0, sticky="w")
+    ttk.Label(main, text="Device pref").grid(row=13, column=0, sticky="w")
     device_pref_var = tk.StringVar()
-    ttk.Entry(main, textvariable=device_pref_var, width=8).grid(
-        row=12, column=1, sticky="w"
-    )
-    ttk.Label(main, text="Compute").grid(row=12, column=2, sticky="w")
+    device_pref_entry = ttk.Entry(main, textvariable=device_pref_var, width=8)
+    device_pref_entry.grid(row=13, column=1, sticky="w")
+    _ToolTip(device_pref_entry, "Preferred compute device (cpu/cuda).")
+    ttk.Label(main, text="Compute").grid(row=13, column=2, sticky="w")
     compute_type_var = tk.StringVar()
-    ttk.Entry(main, textvariable=compute_type_var, width=8).grid(
-        row=12, column=3, sticky="w"
-    )
+    compute_entry = ttk.Entry(main, textvariable=compute_type_var, width=8)
+    compute_entry.grid(row=13, column=3, sticky="w")
+    _ToolTip(compute_entry, "Compute type (e.g., int8, float16).")
 
     diarize_var = tk.BooleanVar(value=False)
-    ttk.Checkbutton(main, text="Diarize", variable=diarize_var).grid(
-        row=13, column=0, sticky="w"
-    )
-    ttk.Label(main, text="HF token").grid(row=13, column=1, sticky="w")
+    diarize_cb = ttk.Checkbutton(main, text="Diarize", variable=diarize_var)
+    diarize_cb.grid(row=14, column=0, sticky="w")
+    _ToolTip(diarize_cb, "Enable speaker diarization.")
+    ttk.Label(main, text="HF token").grid(row=14, column=1, sticky="w")
     hf_token_var = tk.StringVar()
-    ttk.Entry(main, textvariable=hf_token_var, width=20).grid(
-        row=13, column=2, sticky="w"
-    )
+    hf_token_entry = ttk.Entry(main, textvariable=hf_token_var, width=20)
+    hf_token_entry.grid(row=14, column=2, sticky="w")
+    _ToolTip(hf_token_entry, "HuggingFace token for pyannote model.")
 
-    ttk.Label(main, text="Speaker map").grid(row=14, column=0, sticky="w")
+    ttk.Label(main, text="Speaker map").grid(row=15, column=0, sticky="w")
     speaker_map_var = tk.StringVar()
-    ttk.Entry(main, textvariable=speaker_map_var, width=12).grid(
-        row=14, column=1, sticky="w"
-    )
+    speaker_map_entry = ttk.Entry(main, textvariable=speaker_map_var, width=12)
+    speaker_map_entry.grid(row=15, column=1, sticky="w")
+    _ToolTip(speaker_map_entry, "Map speakers (Speaker_0:Matt,...).")
 
     btn_row = ttk.Frame(main)
-    btn_row.grid(row=15, column=0, columnspan=5, sticky="w", pady=(6, 0))
+    btn_row.grid(row=16, column=0, columnspan=5, sticky="w", pady=(6, 0))
     for idx, label in enumerate(presets["context_types"]):
         ttk.Button(
             btn_row, text=label, command=lambda l=label: _start_recording(l)
         ).grid(row=0, column=idx, padx=2)
 
     ttk.Button(main, text="Start", command=_start_custom).grid(
-        row=16, column=0, sticky="w", pady=(6, 0)
+        row=17, column=0, sticky="w", pady=(6, 0)
     )
     ttk.Button(main, text="Save Defaults", command=_save_defaults).grid(
-        row=16, column=1, sticky="w", pady=(6, 0)
+        row=17, column=1, sticky="w", pady=(6, 0)
     )
     ttk.Button(main, text="Save Profile", command=_save_profile).grid(
-        row=16, column=2, sticky="w", pady=(6, 0)
+        row=17, column=2, sticky="w", pady=(6, 0)
     )
     ttk.Button(main, text="Stop", command=_stop_recording).grid(
-        row=16, column=3, sticky="w", pady=(6, 0)
+        row=17, column=3, sticky="w", pady=(6, 0)
     )
 
     timer_var = tk.StringVar(value="00:00")
     ttk.Label(main, textvariable=timer_var).grid(
-        row=17, column=0, sticky="w", pady=(6, 0)
+        row=18, column=0, sticky="w", pady=(6, 0)
     )
     ttk.Button(main, text="Clear", command=_clear_fields).grid(
-        row=17, column=1, sticky="w", pady=(6, 0)
+        row=18, column=1, sticky="w", pady=(6, 0)
     )
     ttk.Button(main, text="Monitor", command=_toggle_monitor).grid(
-        row=17, column=2, sticky="w", pady=(6, 0)
+        row=18, column=2, sticky="w", pady=(6, 0)
     )
     ttk.Button(main, text="HUD", command=_open_hud).grid(
-        row=17, column=4, sticky="w", pady=(6, 0)
+        row=18, column=3, sticky="w", pady=(6, 0)
     )
     ttk.Button(main, text="Reset Peaks", command=_reset_peaks).grid(
-        row=17, column=5, sticky="w", pady=(6, 0)
+        row=18, column=4, sticky="w", pady=(6, 0)
     )
+
     meter_var = tk.IntVar(value=0)
     ttk.Progressbar(main, maximum=100, variable=meter_var, length=120).grid(
-        row=17, column=3, sticky="w", pady=(6, 0)
+        row=19, column=0, sticky="w", pady=(6, 0)
     )
 
     level_var = tk.StringVar(value="0.00")
     peak_var = tk.StringVar(value="0.00")
-    ttk.Label(main, text="Level").grid(row=18, column=0, sticky="w", pady=(6, 0))
+    ttk.Label(main, text="Level").grid(row=19, column=1, sticky="w", pady=(6, 0))
     ttk.Label(main, textvariable=level_var).grid(
-        row=18, column=1, sticky="w", pady=(6, 0)
+        row=19, column=2, sticky="w", pady=(6, 0)
     )
-    ttk.Label(main, text="Peak").grid(row=18, column=2, sticky="w", pady=(6, 0))
+    ttk.Label(main, text="Peak").grid(row=19, column=3, sticky="w", pady=(6, 0))
     ttk.Label(main, textvariable=peak_var).grid(
-        row=18, column=3, sticky="w", pady=(6, 0)
+        row=19, column=4, sticky="w", pady=(6, 0)
     )
 
     status_var = tk.StringVar(value="Idle")
     ttk.Label(main, textvariable=status_var).grid(
-        row=19, column=0, columnspan=4, sticky="w", pady=(6, 0)
+        row=20, column=0, columnspan=5, sticky="w", pady=(6, 0)
     )
 
     def _bind_preset_updates() -> None:

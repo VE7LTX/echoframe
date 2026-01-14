@@ -18,10 +18,18 @@ schema: 1
 
 This document mirrors the full implementation plan from [[README]] and preserves the end-to-end design details in a dedicated reference location.
 
-Primary goal: live local transcription and speaker diarization, fully offline by default. Personal.ai is text-only and never used for transcription or diarization.
+Primary goal: live local transcription and speaker diarization, fully offline by default. Personal.ai is text-only and never used for transcription or diarization. Windows loopback capture enables system audio and dual-track capture without virtual cables.
 
 ## System overview
 EchoFrame is a local personal research assistant designed to record and transcribe audio interactions, then integrate the results into a personal knowledge base. The system leverages a Zoom H2 or H4 Handy Recorder (used as a USB microphone) for high-quality audio capture, processes the audio entirely offline using state-of-the-art speech recognition (OpenAI Whisper or Faster-Whisper) and optional speaker diarization (pyannote), and outputs structured Markdown notes (with YAML metadata) suitable for an Obsidian vault. It also integrates with the Personal.ai API for advanced post-processing such as generating summaries, tagging sentiment, or enabling question-answering on the transcripts using the user's personal AI model. The focus is on developer clarity, modular design, and extensibility, ensuring each component (recording, transcription, diarization, AI integration) can be maintained or upgraded independently.
+
+## Current implementation status
+- Tkinter GUI bar with context fields, presets, and profiles
+- Mic/system/dual capture modes with Windows WASAPI loopback
+- Local recording to WAV with timestamped filenames
+- Faster-Whisper transcription with timestamps
+- Optional pyannote diarization with speaker mapping
+- Obsidian-ready Markdown notes with YAML frontmatter
 
 ## User requirements
 EchoFrame must meet these requirements:
@@ -79,15 +87,25 @@ save_audio: true
 audio:
   sample_rate_hz: 44100
   bit_depth: 16
-  channels: 1
+  channels: 4
 notes:
   add_summary_section: true
   add_action_items_section: false
   embed_audio: true
 context:
-  context_type: "interview"
-  channel: "in_person"
   user_name: "Matt Schafer"
+  default_context_type: "Interview"
+  default_channel: "in_person"
+  context_types: ["Interview", "Client Call", "Internal", "Fieldwork", "Webchat"]
+  channels: ["in_person", "phone", "webchat", "other"]
+  projects: ["Project X", "Project Y"]
+  organizations: ["ClientA", "ClientB"]
+  tags: ["research", "client"]
+  profiles:
+    - name: "Interview"
+      context_type: "Interview"
+      channel: "in_person"
+      tags: ["interview"]
 personal_ai:
   enabled: false
   api_key: "..."
@@ -114,6 +132,8 @@ Zoom H2 or H4 devices act as USB audio inputs. EchoFrame should:
 Device considerations:
 - Windows may default H2/H4 to 48 kHz. Ensure matching sample rate to avoid distortion.
 - Stereo can help with later analysis but is not required for transcription.
+- Zoom H2 supports 4-channel dual-stereo capture (front L/R + rear L/R).
+- Other mic sources (headset, webcam, USB mics) are supported as input devices.
 
 Implementation options:
 - `sounddevice` for high-level capture with NumPy arrays
@@ -125,6 +145,8 @@ System audio capture (Windows):
 - This allows capturing webcall/video chat audio from output devices.
 - Expose a loopback toggle and output-device selection in the GUI/CLI.
 - Support dual-track capture (mic + system) in a single multichannel WAV.
+- Dual-track layout: mic channels first, then system channels.
+- System capture targets speakers/output devices without virtual cables.
 
 Processing logic (recording):
 ```
@@ -239,9 +261,9 @@ Note schema and audio standards:
 ## CLI and automation workflow
 Example CLI flow:
 
-1) Start recording:
+1) Start recording (mic):
 ```
-echoframe record --title "ClientA Interview" --type Interview --participants "Alice, Bob"
+echoframe record --title "ClientA Interview" --mode mic --mic-device "Zoom H2"
 ```
 
 2) Stop recording:
@@ -262,22 +284,25 @@ echoframe record --title "ClientA Interview" --type Interview --participants "Al
 Additional commands:
 ```
 echoframe transcribe path/to/audio.wav --model small
-echoframe diarize path/to/audio.wav --transcript path/to/segments.json
-echoframe note path/to/segments.json --audio path/to/audio.wav
-echoframe process --title "ClientA Interview" --diarize --ai
-echoframe summarize path/to/note.md
-echoframe ask "What were the main concerns?" --event "ClientA Interview 2026-01-12"
+echoframe devices
+echoframe devices --loopback
+echoframe record --mode system --system-device "Speakers"
+echoframe record --mode dual --mic-device "Zoom H2" --system-device "Speakers"
 ```
 
-## GUI approach (basic)
-EchoFrame can include a minimal Tkinter GUI that wraps the CLI flow:
-- Device selector and record toggle
-- Live timer and status text
-- Progress indicator for transcription
-- Final note path and open-in-Obsidian button (optional)
-- Context fields: type, contact name, contact id, organization, project, channel, and notes
+## GUI approach (current)
+The Tkinter bar wraps the capture pipeline with a compact layout:
+- Context fields: title, participants, contact, org/project, channel, notes
+- Presets and profiles for quick context reuse
+- Capture mode: mic / system / dual
+- Mic/system device selection and channel counts
+- Live timer, status text, and audio level monitor
+- Optional HUD meter with colored bars and peak hold
+- Transcription and diarization run after stop
 
-The GUI should call the same core modules used by the CLI.
+App audio isolation (Windows, no virtual cable):
+- Route Zoom/Teams/Meet output to a dedicated output device.
+- Select that device in "System device" and use Capture: system or dual.
 
 ## Architecture (planned)
 Core modules:

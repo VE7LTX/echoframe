@@ -46,6 +46,11 @@ Transcription and diarization are always local. Personal.ai is text-only and nev
 - sample_rate_hz: 44100 or 48000
 - bit_depth: 16
 - channels: 1, 2, or 4
+- capture_mode: mic | system | dual
+- mic_device: string
+- system_device: string
+- system_channels: 1, 2, or 4
+- channel_map: list of channel labels (e.g., front_left, front_right, rear_left, rear_right)
 - context_type: interview | client_call | internal_meeting | fieldwork | webchat
 - contact_name: string
 - contact_id: string
@@ -82,6 +87,15 @@ device: "Zoom H2"
 sample_rate_hz: 44100
 bit_depth: 16
 channels: 1
+capture_mode: mic
+mic_device: "Zoom H2"
+system_device: "Speakers (Realtek)"
+system_channels: 2
+channel_map:
+  - front_left
+  - front_right
+  - rear_left
+  - rear_right
 duration_seconds: 2730
 summary: "..."
 sentiment: "neutral"
@@ -109,6 +123,7 @@ EchoFrame can record from either device as a USB audio input. Use one or both de
 Zoom H2:
 - Typical USB mic mode: 44.1 kHz or 48 kHz, 16-bit, stereo
 - Good for compact fieldwork; onboard mic array offers wide coverage
+- 4-channel mode provides dual-stereo (front L/R and rear L/R) streams (use channel_map in notes)
 
 Zoom H4n:
 - Typical USB mic mode: 44.1 kHz or 48 kHz, 16-bit, stereo
@@ -118,3 +133,4 @@ Zoom H4n:
 - Prefer the device with the cleanest mic placement for the session.
 - For multi-speaker rooms, stereo capture can help with later analysis, but mono is fine for transcription.
 - Always record uncompressed WAV to avoid artifacts that reduce ASR accuracy.
+- Mic inputs can include USB recorders (H2/H4), headset mics, or webcam mics.

@@ -19,285 +19,55 @@ schema: 1
 ---
 # EchoFrame
 
-EchoFrame is a local personal research assistant designed to record and transcribe audio interactions, then integrate the results into a personal knowledge base. It captures audio from a Zoom H2 (or H4) used as a USB microphone, performs offline transcription using OpenAI Whisper or Faster-Whisper, optionally diarizes speakers with pyannote, and emits structured Markdown notes with YAML metadata for Obsidian. Optional Personal.ai integration can enrich notes with summaries, sentiment tags, and Q&A.
+EchoFrame is a local personal research assistant for capturing audio, transcribing it offline, and emitting structured Markdown notes for Obsidian. It is optimized for research work: interviews, client calls, internal meetings, and fieldwork. Personal.ai integration is optional and text-only.
 
-Primary goal: live local transcription and speaker diarization, fully offline by default. Personal.ai is text-only and never used for transcription or diarization. On Windows, EchoFrame can capture system audio via WASAPI loopback for webcall/video chat sources, including dual-track mic + system capture.
-
-## File intent
-- Define the project intent, scope, and planned architecture.
-- Preserve the full implementation plan for the initial build.
-- Provide canonical links to operational docs and schema standards.
-
-## Relationships
-- [AGENTS](AGENTS.md)
-- [CONTRIBUTING](CONTRIBUTING.md)
-- [SECURITY](SECURITY.md)
-- [Frontmatter Schema](docs/frontmatter-schema.md)
-- [Implementation Plan](docs/implementation-plan.md)
-- [LICENSE](LICENSE)
-
-## Relationships (Obsidian)
-- [[AGENTS]]
-- [[CONTRIBUTING]]
-- [[SECURITY]]
-- [[docs/frontmatter-schema]]
-- [[docs/implementation-plan]]
-- [[LICENSE]]
-
-## Implementation plan index
-- [System overview](docs/implementation-plan.md#system-overview)
-- [User requirements](docs/implementation-plan.md#user-requirements)
-- [File and folder structure](docs/implementation-plan.md#file-and-folder-structure)
-- [Config specification](docs/implementation-plan.md#config-specification)
-- [Audio handling and capture](docs/implementation-plan.md#audio-handling-and-capture)
-- [Transcription pipeline](docs/implementation-plan.md#transcription-pipeline)
-- [Diarization strategy (optional)](docs/implementation-plan.md#diarization-strategy-optional)
-- [Personal.ai integration](docs/implementation-plan.md#personalai-integration)
-- [Obsidian output formatting](docs/implementation-plan.md#obsidian-output-formatting)
-- [CLI and automation workflow](docs/implementation-plan.md#cli-and-automation-workflow)
-- [GUI approach (basic)](docs/implementation-plan.md#gui-approach-basic)
-- [Architecture (planned)](docs/implementation-plan.md#architecture-planned)
-- [Open source dependencies (planned)](docs/implementation-plan.md#open-source-dependencies-planned)
-- [Local installation and packaging considerations](docs/implementation-plan.md#local-installation-and-packaging-considerations)
-- [Future features and stretch goals](docs/implementation-plan.md#future-features-and-stretch-goals)
-- [Sources](docs/implementation-plan.md#sources)
+Primary goal: live local transcription and speaker diarization, fully offline by default. On Windows, EchoFrame can capture system audio via WASAPI loopback, including dual-track mic + system capture.
 
 ## Status
-Planning and design phase. No working code yet.
+Prototype working: GUI bar, local recording, Faster-Whisper transcription, optional diarization, and Obsidian-ready notes.
 
-## System overview
-EchoFrame is a local-first tool focused on developer clarity, modular design, and extensibility. Each component (recording, transcription, diarization, AI integration) should be maintainable and upgradeable independently. The system targets a CLI-first implementation with an optional desktop UI wrapper.
+## Key features
+- Local capture from Zoom H2/H4, headset/webcam mics, or Windows system audio (loopback)
+- Dual-track mode: mic + system in one multichannel WAV
+- Faster-Whisper transcription with timestamps
+- Optional speaker diarization with pyannote
+- Obsidian YAML frontmatter + Markdown transcript
+- Context metadata (participants, project, channel, notes)
+- Compact Tkinter GUI with presets, profiles, and audio HUD
 
-## User requirements
-EchoFrame must meet these requirements:
-
-- Audio input via Zoom H2: recognize the H2 as a USB input device and capture audio in real time.
-- Local audio recording with timestamps: record high-quality WAV and timestamp sessions via filenames or metadata.
-- Accurate transcription (ASR): run Whisper or Faster-Whisper locally with timestamps.
-- Speaker diarization (optional): use pyannote to label speakers and align segments.
-- Structured output for Obsidian: Markdown with YAML frontmatter, timestamps, and speaker labeling.
-- Personal.ai integration: upload transcripts, generate summaries and sentiment, enable Q&A.
-- Knowledge system organization: support discovery research workflows with tags or folder structure.
-- Local installation and reusability: CLI or desktop app, offline-first, optional AI calls online.
-
-## File and folder structure
-A clear layout keeps recordings and notes aligned and easy to query.
-
-Base directory (configurable):
-
-```
-ObsidianVault/Research Audio/EchoFrame/
+## Quickstart (Windows)
+Install Python dependencies:
+```powershell
+pip install sounddevice numpy faster-whisper pyannote.audio
 ```
 
-Audio recordings:
-- Suggested subfolder: `Recordings/` or `audio_raw/`
-- Filename format: `YYYY-MM-DD--Short-Title.wav`
-
-Transcripts/notes:
-- Suggested subfolder: `Notes/` or `transcripts/`
-- Filename mirrors audio: `YYYY-MM-DD--Short-Title.md`
-
-Optional category structure:
-```
-EchoFrame/Interviews/2026-01-12--Interview-with-ClientA.md
-EchoFrame/Fieldwork/2026-02-01--SiteObservation.md
-EchoFrame/InternalSync/2026-02-05--TeamMeeting.md
+Run the GUI:
+```powershell
+$env:PYTHONPATH='C:\echoframe\src'
+python -m echoframe.cli gui
 ```
 
-Config and logs:
-- `echoframe_config.yml` (base directory or user home)
-- `logs/` for runtime logs
+## Capture modes
+- mic: record from Zoom H2/H4 or other mic devices.
+- system: capture app audio via WASAPI loopback.
+- dual: record mic + system audio together (separate tracks).
 
-Linking audio to notes:
-- Obsidian supports audio embeds, e.g. `![[2026-01-12--Interview-with-ClientA.wav]]`
+System audio isolation (no virtual cable):
+1) Windows Settings → System → Sound → App volume and device preferences.
+2) Route Zoom/Teams/Meet to the output device you enter in EchoFrame.
+3) Use Capture: system or dual.
 
-## Audio handling and capture
-Zoom H2 or H4 devices act as USB audio inputs. EchoFrame should:
+## Docs
+- [Implementation plan](docs/implementation-plan.md)
+- [Frontmatter schema](docs/frontmatter-schema.md)
+- [TODO](TODO.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security](SECURITY.md)
+- [License](LICENSE)
 
-- Enumerate input devices and default to H2/H4 if detected.
-- Record at 44.1 kHz or 48 kHz, 16-bit WAV.
-- Use mono for transcription by default; allow stereo as an option.
-- Provide simple start/stop control (CLI or GUI).
-- Report status (recording indicator, duration, basic levels if possible).
-
-Device considerations:
-- Windows may default H2/H4 to 48 kHz. Ensure matching sample rate to avoid distortion.
-- Stereo can help with later analysis but is not required for transcription.
-
-Implementation options:
-- `sounddevice` for high-level capture with NumPy arrays
-- `pyaudio` (PortAudio wrapper) for low-level streaming
-- Use Python `wave` to write incrementally to WAV
-
-## Transcription pipeline
-EchoFrame uses Whisper or Faster-Whisper for offline ASR.
-
-Steps:
-- Load chosen model (tiny/base/small/medium/large).
-- Downsample to 16 kHz mono as needed.
-- Run transcription with timestamps (segment or word-level when available).
-- Preserve segments for alignment and note formatting.
-
-Performance:
-- Faster-Whisper offers strong CPU performance with quantization.
-- GPU acceleration is optional but improves speed.
-- Provide progress feedback for long sessions.
-
-## Diarization strategy (optional)
-Use `pyannote.audio` to separate speakers:
-
-- Run diarization on the WAV file.
-- Align transcript segments to speaker segments by time overlap.
-- Merge consecutive segments from the same speaker for readability.
-- Default speaker labels to `Speaker_0`, `Speaker_1`, etc.
-- Optionally map speaker labels to names from YAML `participants`.
-
-Alternative:
-- WhisperX can perform ASR + diarization in one pipeline, at the cost of heavier dependencies.
-
-## Personal.ai integration
-If configured, EchoFrame can enrich notes with Personal.ai:
-
-- Upload transcript to memory (`/upload-text`).
-- Query for summary and sentiment (`/message`).
-- Optionally request action items or key insights.
-- Embed outputs in YAML and/or visible sections.
-
-Fail-safe behavior:
-- If API calls fail, continue note creation without AI content.
-- Allow later re-run of summary or sentiment via CLI.
-
-## Obsidian output formatting
-Each session produces a Markdown note:
-
-YAML frontmatter example:
-```
----
-schema: 1
-title: Interview with ClientA
-date: 2026-01-12
-time: "20:15"
-duration_seconds: 2700
-participants:
-  - Alice (Researcher)
-  - Bob (ClientA)
-type: Interview
-project: Project X
-tags: [DiscoveryResearch, ClientA, Interview]
-audio: 2026-01-12--Interview-with-ClientA.wav
-device: "Zoom H2"
-sample_rate_hz: 44100
-bit_depth: 16
-channels: 1
-summary: >
-  ClientA was enthusiastic about the design and raised a budget concern.
-sentiment: Positive
----
-```
-
-Recommended sections:
-- Summary
-- Transcript
-- Action Items (optional)
-
-Transcript format:
-```
-[00:00:03] Alice: Thank you for meeting with me today.
-[00:00:12] Bob: My pleasure. I am excited about the project.
-```
-
-## CLI and automation workflow
-Example CLI flow:
-
-1) Start recording:
-```
-echoframe record --title "ClientA Interview" --type Interview --participants "Alice, Bob"
-```
-
-2) Stop recording:
-- Ctrl+C or GUI stop button
-
-3) Transcribe:
-- Whisper or Faster-Whisper runs locally
-
-4) Diarize (optional):
-- Align speaker segments
-
-5) Enrich with AI (optional):
-- Upload transcript, get summary/sentiment
-
-6) Assemble note:
-- Write Markdown with YAML and transcript
-
-Additional commands:
-```
-echoframe transcribe path/to/audio.wav --model small
-echoframe diarize path/to/audio.wav --transcript path/to/segments.json
-echoframe note path/to/segments.json --audio path/to/audio.wav
-echoframe process --title "ClientA Interview" --diarize --ai
-echoframe summarize path/to/note.md
-echoframe ask "What were the main concerns?" --event "ClientA Interview 2026-01-12"
-```
-
-## Architecture (planned)
-Core modules:
-- recorder: device discovery, stream capture, WAV writing
-- transcriber: audio normalization and ASR segments with timestamps
-- diarizer: optional speaker labeling aligned to transcript segments
-- renderer: Markdown note assembly with YAML frontmatter
-- storage: naming rules, folder layout, and file I/O
-- config: load/merge config and CLI overrides
-- ai_client: optional Personal.ai enrichment
-
-Core data contract:
-- Session: id, title, started_at, duration, audio_path, segments, speakers, note_path, ai_summary, ai_sentiment
-- Segment: start, end, text, speaker (optional)
-- Frontmatter schema version (e.g. schema: 1) to keep notes upgradeable
-
-## Open source dependencies (planned)
-Core runtime:
-- Python 3.10+
-- FFmpeg (audio decoding and resampling)
-- sounddevice (PortAudio) or PyAudio for recording
-- Faster-Whisper (or openai-whisper) for ASR
-- PyTorch + torchaudio (backend for ASR/diarization)
-- pyannote.audio for speaker diarization (optional)
-- PyYAML for frontmatter
-- rich or textual for CLI output (optional)
-- typer or click for CLI parsing
-- requests or httpx for Personal.ai API calls
-
-Packaging and install:
-- pyproject.toml with console_scripts entry point
-- pip installation for dev use
-- PyInstaller for a standalone desktop executable (Windows/Mac/Linux)
-
-## Local installation and packaging considerations
-- Cross-platform audio capture is the most error-prone area.
-- Prefer `sounddevice` for easier installation over `pyaudio`.
-- Whisper models download on first use; document cache location.
-- GPU acceleration requires user-installed PyTorch CUDA build.
-- FFmpeg may be required for resampling and decoding.
-- Standalone builds (PyInstaller) will be large due to ML dependencies.
-
-## Future features and stretch goals
-- Real-time transcription (streaming)
-- Obsidian plugin integration
-- Speaker profile calibration
-- NLP annotations (topics, action items, entities, emotion)
-- Multi-modal inputs (video, images)
-- Alternate ASR backends (Vosk, Kaldi, cloud services)
-- Rich GUI with waveform editor
-- Mobile capture workflow
-- Continuous discovery insights tagging
-- Model fine-tuning for user-specific vocabulary
-
-## Sources
-- Real Python: Playing and Recording Sound in Python
-- Modal Blog: Choosing between Whisper variants
-- Scalastic: Whisper and Pyannote for transcription and diarization
-- Personal.ai Documentation: Upload Document API
-- The Sweet Setup: Obsidian YAML and Dataview
-
-## License
-MIT. See [LICENSE](LICENSE).
+## Obsidian links
+- [[docs/frontmatter-schema]]
+- [[docs/implementation-plan]]
+- [[TODO]]
+- [[CONTRIBUTING]]
+- [[SECURITY]]

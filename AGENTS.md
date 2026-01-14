@@ -17,7 +17,7 @@ schema: 1
 ---
 # AGENTS.md
 
-EchoFrame is currently a documentation-only repository. There is no code or tests yet.
+EchoFrame includes a working prototype (GUI, recording, transcription, diarization). Keep docs aligned with behavior.
 
 ## File intent
 - Document how automated agents should behave in this repository.
@@ -33,6 +33,7 @@ EchoFrame is currently a documentation-only repository. There is no code or test
 ## Guidance
 - Keep documentation concise and ASCII-only.
 - When adding code, update README.md with setup and usage details.
+- Keep docs/implementation-plan.md aligned with actual behavior.
 - Prefer small, modular components with clear CLI entry points.
 - Avoid committing large binary assets or model files.
 - If adding new docs, place them at the repo root or under a docs/ folder.

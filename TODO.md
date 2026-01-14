@@ -21,6 +21,8 @@ schema: 1
 - [x] CLI device listing
 - [x] Fixed-duration recording to WAV
 - [x] Streaming recording with manual stop
+- [x] System audio capture (WASAPI loopback)
+- [x] Dual-track mic + system capture
 - [x] Faster-Whisper transcription with timestamps
 - [x] Speaker diarization with pyannote
 - [x] Alignment of diarization to transcript segments
@@ -45,6 +47,7 @@ schema: 1
 - [x] Note creation status and output path
 - [x] Context input fields (type, contact, project, channel, notes)
 - [x] Local transcription and diarization trigger
+- [x] Audio monitor and HUD meter
 
 ## Packaging and validation
 - [x] pyproject.toml scaffolding
