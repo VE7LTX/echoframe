@@ -16,10 +16,12 @@ schema: 1
 # EchoFrame TODO
 
 ## MVP priorities
-- [ ] Use `base_dir` for output paths in GUI and CLI (Recordings/Notes)
+- [x] Use `base_dir` for output paths in GUI and CLI (Recordings/Notes)
 - [ ] Emit capture metadata in notes (capture_mode, mic/system devices, channel_map)
 - [ ] Ensure transcription/diarization use mic-only channels in dual-track mode
 - [ ] Session metadata persistence (session.json, segments.json)
+- [x] Implement folder structure creation (Recordings/Notes/Segments/Sessions/Logs)
+- [x] Optional category subfolders (by context_type)
 
 ## Core pipeline
 - [x] Project scaffold and module stubs

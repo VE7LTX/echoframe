@@ -52,12 +52,19 @@ ObsidianVault/Research Audio/EchoFrame/
 ```
 
 Audio recordings:
-- Suggested subfolder: `Recordings/` or `audio_raw/`
+- Subfolder: `Recordings/`
 - Filename format: `YYYY-MM-DD--Short-Title.wav`
 
 Transcripts/notes:
-- Suggested subfolder: `Notes/` or `transcripts/`
+- Subfolder: `Notes/`
 - Filename mirrors audio: `YYYY-MM-DD--Short-Title.md`
+
+Segments and session metadata:
+- `Segments/` for ASR outputs
+- `Sessions/` for session metadata
+
+Logs:
+- `Logs/` for runtime logs
 
 Optional category structure:
 ```
@@ -68,7 +75,7 @@ EchoFrame/InternalSync/2026-02-05--TeamMeeting.md
 
 Config and logs:
 - `echoframe_config.yml` (base directory or user home)
-- `logs/` for runtime logs
+- `Logs/` for runtime logs
 
 Linking audio to notes:
 - Obsidian supports audio embeds, e.g. `![[2026-01-12--Interview-with-ClientA.wav]]`
@@ -106,6 +113,7 @@ context:
       context_type: "Interview"
       channel: "in_person"
       tags: ["interview"]
+  use_type_folders: true
 personal_ai:
   enabled: false
   api_key: "..."

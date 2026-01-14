@@ -57,6 +57,22 @@ System audio isolation (no virtual cable):
 2) Route Zoom/Teams/Meet to the output device you enter in EchoFrame.
 3) Use Capture: system or dual.
 
+## Output structure
+```
+<base_dir>\EchoFrame\
+  Recordings\
+  Notes\
+  Segments\
+  Sessions\
+  Logs\
+```
+
+Optional category subfolders:
+```
+Recordings\Interview\
+Notes\Interview\
+```
+
 ## Docs
 - [Implementation plan](docs/implementation-plan.md)
 - [Frontmatter schema](docs/frontmatter-schema.md)

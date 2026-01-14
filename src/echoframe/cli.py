@@ -15,7 +15,8 @@ from .recorder import (
     record_audio_stream_dual,
 )
 from .transcriber import transcribe_audio
-from .storage import build_session_basename, ensure_dir
+from .storage import build_session_basename, get_output_dirs
+from .config import load_config
 
 
 def main() -> int:
@@ -32,7 +33,14 @@ def main() -> int:
 
     record_cmd = sub.add_parser("record")
     record_cmd.add_argument("--title", default="Session", help="Session title.")
-    record_cmd.add_argument("--out-dir", default="Recordings", help="Output folder.")
+    record_cmd.add_argument("--config", default="echoframe_config.yml", help="Config.")
+    record_cmd.add_argument("--base-dir", help="Base output directory.")
+    record_cmd.add_argument("--context-type", help="Context type for subfolders.")
+    record_cmd.add_argument(
+        "--use-type-folders",
+        action="store_true",
+        help="Store recordings/notes under context type subfolders.",
+    )
     record_cmd.add_argument(
         "--duration", type=int, help="Seconds. Omit for manual stop."
     )
@@ -86,9 +94,17 @@ def main() -> int:
         return 0
 
     if args.command == "record":
-        ensure_dir(args.out_dir)
+        base_dir = args.base_dir
+        if not base_dir and os.path.exists(args.config):
+            cfg = load_config(args.config)
+            base_dir = cfg.base_dir
+        paths = get_output_dirs(
+            base_dir or os.getcwd(),
+            context_type=args.context_type,
+            use_type_folders=bool(args.use_type_folders),
+        )
         basename = build_session_basename(args.title, datetime.now())
-        output_path = os.path.join(args.out_dir, f"{basename}.wav")
+        output_path = os.path.join(paths["recordings"], f"{basename}.wav")
         mode = args.mode
         mic_device = args.mic_device or args.device
         system_device = args.system_device or args.device

@@ -12,7 +12,7 @@ from .config import Config, load_config, save_config
 from .diarizer import diarize_segments
 from .recorder import record_audio_stream, record_audio_stream_dual
 from .renderer import render_note
-from .storage import build_session_basename, ensure_dir
+from .storage import build_session_basename, ensure_dir, ensure_structure, get_output_dirs
 from .transcriber import transcribe_audio
 from .logging_utils import setup_logging
 
@@ -34,7 +34,8 @@ def launch_gui() -> None:
     else:
         config = Config(base_dir="")
 
-    logger, log_path = setup_logging()
+    base_paths = ensure_structure(config.base_dir)
+    logger, log_path = setup_logging(log_dir=base_paths["logs"])
 
     presets = {
         "context_types": config.context.get(
@@ -148,6 +149,7 @@ def launch_gui() -> None:
         config.context["user_name"] = user_name_var.get().strip()
         config.context["default_context_type"] = context_type_var.get().strip()
         config.context["default_channel"] = channel_var.get().strip()
+        config.context["use_type_folders"] = use_type_folders_var.get()
         save_config(config_path, config)
         _set_status("Defaults saved")
 
@@ -303,8 +305,12 @@ def launch_gui() -> None:
         logger.info("Start recording: %s", output_path)
 
         title = title_var.get().strip() or context_type
-        out_dir = "Recordings"
-        ensure_dir(out_dir)
+        paths = get_output_dirs(
+            config.base_dir,
+            context_type=context_type,
+            use_type_folders=use_type_folders_var.get(),
+        )
+        out_dir = paths["recordings"]
         basename = build_session_basename(title, datetime.now())
         output_path = os.path.join(out_dir, f"{basename}.wav")
 
@@ -412,8 +418,7 @@ def launch_gui() -> None:
                 context_notes=notes_box.get("1.0", "end").strip() or None,
             )
 
-            notes_dir = "Notes"
-            ensure_dir(notes_dir)
+            notes_dir = paths["notes"]
             note_path = os.path.join(notes_dir, f"{basename}.md")
             with open(note_path, "w", encoding="utf-8") as handle:
                 handle.write(note_text)
@@ -634,6 +639,15 @@ def launch_gui() -> None:
     )
     context_combo.grid(row=8, column=3, sticky="w")
     _ToolTip(context_combo, "Context type used in frontmatter.")
+
+    use_type_folders_var = tk.BooleanVar(
+        value=config.context.get("use_type_folders", False)
+    )
+    use_type_folders_cb = ttk.Checkbutton(
+        main, text="Type folders", variable=use_type_folders_var
+    )
+    use_type_folders_cb.grid(row=8, column=4, sticky="w")
+    _ToolTip(use_type_folders_cb, "Organize recordings/notes by context type.")
 
     ttk.Label(main, text="Profile").grid(row=8, column=0, sticky="w")
     profile_var = tk.StringVar()
