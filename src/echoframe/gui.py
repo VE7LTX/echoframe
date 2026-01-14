@@ -15,6 +15,7 @@ from .renderer import render_note
 from .storage import build_session_basename, ensure_dir, ensure_structure, get_output_dirs
 from .transcriber import transcribe_audio
 from .logging_utils import setup_logging
+from .audio_utils import extract_channels
 
 
 def launch_gui() -> None:
@@ -358,8 +359,21 @@ def launch_gui() -> None:
             state["start_time"] = None
             _set_status("Transcribing...")
 
+            transcribe_path = output_path
+            if mode == "dual":
+                mic_count = int(mic_channels_var.get())
+                segments_dir = paths["segments"]
+                ensure_dir(segments_dir)
+                mic_only_path = os.path.join(
+                    segments_dir, f"{basename}.mic.wav"
+                )
+                extract_channels(
+                    output_path, mic_only_path, list(range(0, mic_count))
+                )
+                transcribe_path = mic_only_path
+
             segments = transcribe_audio(
-                output_path,
+                transcribe_path,
                 model_name=model_var.get().strip() or "small",
                 language=language_var.get().strip() or None,
                 device=device_pref_var.get().strip() or None,
@@ -375,7 +389,7 @@ def launch_gui() -> None:
                             k, v = pair.split(":", 1)
                             speaker_map[k.strip()] = v.strip()
                     segments = diarize_segments(
-                        output_path,
+                        transcribe_path,
                         segments,
                         speaker_map=speaker_map or None,
                         hf_token=hf_token_var.get().strip() or None,
