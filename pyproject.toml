@@ -12,6 +12,9 @@ license = { file = "LICENSE" }
 authors = [{ name = "Matt Schafer VE7LTX" }]
 keywords = ["transcription", "obsidian", "whisper", "audio"]
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
 [project.urls]
 Homepage = "https://github.com/ve7ltx/echoframe"
 

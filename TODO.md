@@ -52,5 +52,5 @@ schema: 1
 ## Packaging and validation
 - [x] pyproject.toml scaffolding
 - [ ] Dependency pins and extras
-- [ ] Basic tests for config, naming, rendering
+- [x] Basic tests for config, naming, rendering
 - [ ] Windows build check (PyInstaller)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -13,6 +14,7 @@ from .recorder import record_audio_stream, record_audio_stream_dual
 from .renderer import render_note
 from .storage import build_session_basename, ensure_dir
 from .transcriber import transcribe_audio
+from .logging_utils import setup_logging
 
 
 def launch_gui() -> None:
@@ -31,6 +33,8 @@ def launch_gui() -> None:
             config = Config(base_dir="")
     else:
         config = Config(base_dir="")
+
+    logger, log_path = setup_logging()
 
     presets = {
         "context_types": config.context.get(
@@ -125,6 +129,7 @@ def launch_gui() -> None:
 
     def _set_status(text: str) -> None:
         status_var.set(text)
+        logger.info(text)
 
     def _remember_preset(key: str, value: str) -> None:
         value = value.strip()
@@ -181,6 +186,7 @@ def launch_gui() -> None:
             import sounddevice as sd
             import numpy as np
         except Exception as exc:
+            logger.exception("Monitor failed")
             _set_status(f"Monitor failed: {exc}")
             return
 
@@ -229,6 +235,7 @@ def launch_gui() -> None:
             monitor["stream"] = stream
             _set_status("Monitoring levels...")
         except Exception as exc:
+            logger.exception("Monitor failed")
             _set_status(f"Monitor failed: {exc}")
 
     def _open_hud() -> None:
@@ -293,6 +300,7 @@ def launch_gui() -> None:
         state["stop_event"].clear()
         timer_var.set("00:00")
         _set_status(f"Recording ({context_type})...")
+        logger.info("Start recording: %s", output_path)
 
         title = title_var.get().strip() or context_type
         out_dir = "Recordings"
@@ -354,6 +362,7 @@ def launch_gui() -> None:
                         hf_token=hf_token_var.get().strip() or None,
                     )
                 except Exception as exc:
+                    logger.exception("Diarization failed")
                     _set_status(f"Diarization failed: {exc}")
 
             title = title_var.get().strip() or context_type
@@ -410,6 +419,7 @@ def launch_gui() -> None:
                 handle.write(note_text)
 
             _set_status(f"Saved: {note_path}")
+            logger.info("Note saved: %s", note_path)
 
         state["thread"] = threading.Thread(target=_worker, daemon=True)
         state["thread"].start()
@@ -480,6 +490,56 @@ def launch_gui() -> None:
         profile_var.set("")
         profile_name_var.set("")
         _set_status("Cleared")
+
+    menubar = tk.Menu(root)
+    help_menu = tk.Menu(menubar, tearoff=0)
+    dev_menu = tk.Menu(help_menu, tearoff=0)
+    root.config(menu=menubar)
+    menubar.add_cascade(label="Help", menu=help_menu)
+    help_menu.add_cascade(label="Developer", menu=dev_menu)
+
+    def _open_log_viewer() -> None:
+        win = tk.Toplevel(root)
+        win.title("EchoFrame Log")
+        win.resizable(True, True)
+        text = tk.Text(win, width=100, height=30)
+        text.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        scroll = ttk.Scrollbar(win, command=text.yview)
+        scroll.grid(row=0, column=2, sticky="ns")
+        text.configure(yscrollcommand=scroll.set)
+
+        def _refresh() -> None:
+            text.delete("1.0", "end")
+            if os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8") as handle:
+                    text.insert("end", handle.read())
+            else:
+                text.insert("end", "Log file not found.\n")
+
+        ttk.Button(win, text="Refresh", command=_refresh).grid(
+            row=1, column=0, sticky="w", pady=(6, 6), padx=(6, 0)
+        )
+        ttk.Button(win, text="Close", command=win.destroy).grid(
+            row=1, column=1, sticky="e", pady=(6, 6), padx=(0, 6)
+        )
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(0, weight=1)
+        _refresh()
+
+    def _open_log_folder() -> None:
+        log_dir = os.path.dirname(log_path)
+        try:
+            os.startfile(log_dir)  # type: ignore[attr-defined]
+        except Exception as exc:
+            _set_status(f"Open log folder failed: {exc}")
+
+    def _enable_debug() -> None:
+        logger.setLevel(logging.DEBUG)
+        _set_status("Debug logging enabled")
+
+    dev_menu.add_command(label="View Log", command=_open_log_viewer)
+    dev_menu.add_command(label="Open Log Folder", command=_open_log_folder)
+    dev_menu.add_command(label="Enable Debug Logging", command=_enable_debug)
 
     main = ttk.Frame(root, padding=8)
     main.grid(row=0, column=0, sticky="nsew")
