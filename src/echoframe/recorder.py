@@ -12,18 +12,20 @@ class RecordingResult:
     duration_seconds: int
 
 
-def list_input_devices() -> List[Dict[str, Any]]:
+def list_input_devices(loopback: bool = False) -> List[Dict[str, Any]]:
     try:
         import sounddevice as sd
     except Exception as exc:  # pragma: no cover - environment-dependent
         raise RuntimeError("sounddevice is required for device detection.") from exc
 
     devices = sd.query_devices()
+    if loopback:
+        return [d for d in devices if d.get("max_output_channels", 0) > 0]
     return [d for d in devices if d.get("max_input_channels", 0) > 0]
 
 
-def find_input_device(prefer_name: Optional[str] = None) -> dict:
-    candidates = list_input_devices()
+def find_input_device(prefer_name: Optional[str] = None, loopback: bool = False) -> dict:
+    candidates = list_input_devices(loopback=loopback)
     if not candidates:
         raise RuntimeError("No input devices found.")
 
@@ -52,6 +54,7 @@ def record_audio(
     sample_rate_hz: int = 44100,
     channels: int = 1,
     device_name: Optional[str] = None,
+    loopback: bool = False,
 ) -> RecordingResult:
     try:
         import sounddevice as sd
@@ -63,11 +66,15 @@ def record_audio(
     except Exception as exc:  # pragma: no cover - environment-dependent
         raise RuntimeError("numpy is required for recording.") from exc
 
-    device = find_input_device(device_name)
+    device = find_input_device(device_name, loopback=loopback)
     device_index = device.get("index")
     frames = int(duration_seconds * sample_rate_hz)
     if frames <= 0:
         raise ValueError("duration_seconds must be > 0.")
+
+    extra_settings = None
+    if loopback and hasattr(sd, "WasapiSettings"):
+        extra_settings = sd.WasapiSettings(loopback=True)
 
     recording = sd.rec(
         frames,
@@ -75,6 +82,7 @@ def record_audio(
         channels=channels,
         dtype="int16",
         device=device_index,
+        extra_settings=extra_settings,
     )
     sd.wait()
 
@@ -98,13 +106,14 @@ def record_audio_stream(
     channels: int = 1,
     device_name: Optional[str] = None,
     stop_event=None,
+    loopback: bool = False,
 ) -> RecordingResult:
     try:
         import sounddevice as sd
     except Exception as exc:  # pragma: no cover - environment-dependent
         raise RuntimeError("sounddevice is required for recording.") from exc
 
-    device = find_input_device(device_name)
+    device = find_input_device(device_name, loopback=loopback)
     device_index = device.get("index")
 
     import wave
@@ -122,6 +131,9 @@ def record_audio_stream(
             handle.writeframes(indata.tobytes())
             frames_written += _frames
 
+        extra_settings = None
+        if loopback and hasattr(sd, "WasapiSettings"):
+            extra_settings = sd.WasapiSettings(loopback=True)
         try:
             with sd.InputStream(
                 samplerate=sample_rate_hz,
@@ -129,6 +141,7 @@ def record_audio_stream(
                 dtype="int16",
                 device=device_index,
                 callback=_callback,
+                extra_settings=extra_settings,
             ):
                 while True:
                     if stop_event is not None and stop_event.is_set():

@@ -19,6 +19,11 @@ def main() -> int:
 
     devices_cmd = sub.add_parser("devices")
     devices_cmd.add_argument("--match", help="Filter device names by substring.")
+    devices_cmd.add_argument(
+        "--loopback",
+        action="store_true",
+        help="List output devices for system audio capture (WASAPI).",
+    )
 
     record_cmd = sub.add_parser("record")
     record_cmd.add_argument("--title", default="Session", help="Session title.")
@@ -29,6 +34,11 @@ def main() -> int:
     record_cmd.add_argument("--device", help="Preferred device name substring.")
     record_cmd.add_argument("--rate", type=int, default=44100, help="Sample rate.")
     record_cmd.add_argument("--channels", type=int, default=1, help="Channels.")
+    record_cmd.add_argument(
+        "--loopback",
+        action="store_true",
+        help="Capture system audio via WASAPI loopback.",
+    )
 
     transcribe_cmd = sub.add_parser("transcribe")
     transcribe_cmd.add_argument("audio_path", help="Path to audio file.")
@@ -43,7 +53,7 @@ def main() -> int:
 
     args = parser.parse_args()
     if args.command == "devices":
-        devices = list_input_devices()
+        devices = list_input_devices(loopback=bool(args.loopback))
         if args.match:
             devices = [
                 d for d in devices if args.match.lower() in d.get("name", "").lower()
@@ -51,8 +61,12 @@ def main() -> int:
         for device in devices:
             name = device.get("name", "Unknown")
             index = device.get("index", "?")
-            channels = device.get("max_input_channels", 0)
-            print(f"[{index}] {name} (inputs: {channels})")
+            if args.loopback:
+                channels = device.get("max_output_channels", 0)
+                print(f"[{index}] {name} (outputs: {channels})")
+            else:
+                channels = device.get("max_input_channels", 0)
+                print(f"[{index}] {name} (inputs: {channels})")
         return 0
 
     if args.command == "record":
@@ -66,6 +80,7 @@ def main() -> int:
                 sample_rate_hz=args.rate,
                 channels=args.channels,
                 device_name=args.device,
+                loopback=args.loopback,
             )
         else:
             record_audio_stream(
@@ -73,6 +88,7 @@ def main() -> int:
                 sample_rate_hz=args.rate,
                 channels=args.channels,
                 device_name=args.device,
+                loopback=args.loopback,
             )
         print(f"Wrote {output_path}")
         return 0

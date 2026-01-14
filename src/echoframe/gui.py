@@ -80,6 +80,12 @@ def launch_gui() -> None:
         "stop_event": threading.Event(),
         "thread": None,
     }
+    monitor = {
+        "stream": None,
+        "level": 0.0,
+        "peak": 0.0,
+        "lock": threading.Lock(),
+    }
 
     def _set_status(text: str) -> None:
         status_var.set(text)
@@ -111,6 +117,59 @@ def launch_gui() -> None:
             timer_var.set(f"{mins:02d}:{secs:02d}")
         root.after(500, _update_timer)
 
+    def _update_meter() -> None:
+        with monitor["lock"]:
+            level = monitor["level"]
+            peak = monitor["peak"]
+        meter_var.set(min(100, int(level * 100)))
+        level_var.set(f"{level:.2f}")
+        peak_var.set(f"{peak:.2f}")
+        root.after(200, _update_meter)
+
+    def _toggle_monitor() -> None:
+        if monitor["stream"] is not None:
+            try:
+                monitor["stream"].stop()
+                monitor["stream"].close()
+            except Exception:
+                pass
+            monitor["stream"] = None
+            _set_status("Monitor stopped")
+            return
+
+        try:
+            import sounddevice as sd
+            import numpy as np
+        except Exception as exc:
+            _set_status(f"Monitor failed: {exc}")
+            return
+
+        def _cb(indata, _frames, _time, status):
+            if status:
+                return
+            rms = float(np.sqrt(np.mean(indata.astype("float32") ** 2)))
+            with monitor["lock"]:
+                monitor["level"] = rms
+                monitor["peak"] = max(monitor["peak"], rms)
+
+        try:
+            extra_settings = None
+            if loopback_var.get() and hasattr(sd, "WasapiSettings"):
+                extra_settings = sd.WasapiSettings(loopback=True)
+            stream = sd.InputStream(
+                samplerate=int(rate_var.get()),
+                channels=int(channels_var.get()),
+                dtype="int16",
+                device=device_var.get().strip() or None,
+                callback=_cb,
+                extra_settings=extra_settings,
+            )
+            stream.start()
+            monitor["stream"] = stream
+            _set_status("Monitoring levels...")
+        except Exception as exc:
+            _set_status(f"Monitor failed: {exc}")
+
     def _start_recording(context_type: str) -> None:
         if state["recording"]:
             return
@@ -133,6 +192,7 @@ def launch_gui() -> None:
                 channels=int(channels_var.get()),
                 device_name=device_var.get().strip() or None,
                 stop_event=state["stop_event"],
+                loopback=loopback_var.get(),
             )
             state["recording"] = False
             state["start_time"] = None
@@ -388,17 +448,24 @@ def launch_gui() -> None:
     ttk.Entry(main, textvariable=device_var, width=20).grid(
         row=8, column=1, sticky="w"
     )
-    ttk.Label(main, text="Rate").grid(row=8, column=2, sticky="w")
+    loopback_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(main, text="System audio", variable=loopback_var).grid(
+        row=8, column=2, sticky="w"
+    )
+    ttk.Label(main, text="Rate").grid(row=8, column=3, sticky="w")
     rate_var = tk.StringVar(value=str(config.audio.sample_rate_hz))
     ttk.Entry(main, textvariable=rate_var, width=8).grid(
-        row=8, column=3, sticky="w"
+        row=8, column=4, sticky="w"
     )
 
     ttk.Label(main, text="Channels").grid(row=9, column=0, sticky="w")
     channels_var = tk.StringVar(value=str(config.audio.channels))
-    ttk.Entry(main, textvariable=channels_var, width=8).grid(
-        row=9, column=1, sticky="w"
-    )
+    ttk.Combobox(
+        main,
+        textvariable=channels_var,
+        values=["1", "2", "4"],
+        width=6,
+    ).grid(row=9, column=1, sticky="w")
 
     ttk.Label(main, text="Model").grid(row=9, column=2, sticky="w")
     model_var = tk.StringVar(value=config.whisper_model)
@@ -439,7 +506,7 @@ def launch_gui() -> None:
     )
 
     btn_row = ttk.Frame(main)
-    btn_row.grid(row=13, column=0, columnspan=4, sticky="w", pady=(6, 0))
+    btn_row.grid(row=13, column=0, columnspan=5, sticky="w", pady=(6, 0))
     for idx, label in enumerate(presets["context_types"]):
         ttk.Button(
             btn_row, text=label, command=lambda l=label: _start_recording(l)
@@ -467,9 +534,29 @@ def launch_gui() -> None:
         row=15, column=1, sticky="w", pady=(6, 0)
     )
 
+    ttk.Button(main, text="Monitor", command=_toggle_monitor).grid(
+        row=15, column=2, sticky="w", pady=(6, 0)
+    )
+
+    meter_var = tk.IntVar(value=0)
+    ttk.Progressbar(main, maximum=100, variable=meter_var, length=120).grid(
+        row=15, column=3, sticky="w", pady=(6, 0)
+    )
+
+    level_var = tk.StringVar(value="0.00")
+    peak_var = tk.StringVar(value="0.00")
+    ttk.Label(main, text="Level").grid(row=16, column=0, sticky="w", pady=(6, 0))
+    ttk.Label(main, textvariable=level_var).grid(
+        row=16, column=1, sticky="w", pady=(6, 0)
+    )
+    ttk.Label(main, text="Peak").grid(row=16, column=2, sticky="w", pady=(6, 0))
+    ttk.Label(main, textvariable=peak_var).grid(
+        row=16, column=3, sticky="w", pady=(6, 0)
+    )
+
     status_var = tk.StringVar(value="Idle")
     ttk.Label(main, textvariable=status_var).grid(
-        row=15, column=2, columnspan=2, sticky="w", pady=(6, 0)
+        row=17, column=0, columnspan=5, sticky="w", pady=(6, 0)
     )
 
     def _bind_preset_updates() -> None:
@@ -499,4 +586,5 @@ def launch_gui() -> None:
 
     _bind_preset_updates()
     _update_timer()
+    _update_meter()
     root.mainloop()

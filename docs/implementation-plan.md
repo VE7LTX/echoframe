@@ -120,6 +120,11 @@ Implementation options:
 - `pyaudio` (PortAudio wrapper) for low-level streaming
 - Use Python `wave` to write incrementally to WAV
 
+System audio capture (Windows):
+- Use WASAPI loopback via `sounddevice.WasapiSettings(loopback=True)`.
+- This allows capturing webcall/video chat audio from output devices.
+- Expose a loopback toggle and output-device selection in the GUI/CLI.
+
 Processing logic (recording):
 ```
 1. Resolve device by name or default.

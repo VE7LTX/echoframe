@@ -21,7 +21,7 @@ schema: 1
 
 EchoFrame is a local personal research assistant designed to record and transcribe audio interactions, then integrate the results into a personal knowledge base. It captures audio from a Zoom H2 (or H4) used as a USB microphone, performs offline transcription using OpenAI Whisper or Faster-Whisper, optionally diarizes speakers with pyannote, and emits structured Markdown notes with YAML metadata for Obsidian. Optional Personal.ai integration can enrich notes with summaries, sentiment tags, and Q&A.
 
-Primary goal: live local transcription and speaker diarization, fully offline by default. Personal.ai is text-only and never used for transcription or diarization.
+Primary goal: live local transcription and speaker diarization, fully offline by default. Personal.ai is text-only and never used for transcription or diarization. On Windows, EchoFrame can capture system audio via WASAPI loopback for webcall/video chat sources.
 
 ## File intent
 - Define the project intent, scope, and planned architecture.

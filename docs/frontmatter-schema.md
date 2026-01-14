@@ -45,7 +45,7 @@ Transcription and diarization are always local. Personal.ai is text-only and nev
 - device: e.g. "Zoom H2" or "Zoom H4n"
 - sample_rate_hz: 44100 or 48000
 - bit_depth: 16
-- channels: 1 or 2
+- channels: 1, 2, or 4
 - context_type: interview | client_call | internal_meeting | fieldwork | webchat
 - contact_name: string
 - contact_id: string
@@ -98,8 +98,10 @@ Recommended capture formats:
 PCM bitrate reference:
 - 44.1 kHz, 16-bit, mono: 705.6 kbps
 - 44.1 kHz, 16-bit, stereo: 1411.2 kbps
+- 44.1 kHz, 16-bit, 4-channel: 2822.4 kbps
 - 48 kHz, 16-bit, mono: 768 kbps
 - 48 kHz, 16-bit, stereo: 1536 kbps
+- 48 kHz, 16-bit, 4-channel: 3072 kbps
 
 ## Zoom H2 / H4 device notes
 EchoFrame can record from either device as a USB audio input. Use one or both depending on availability.
