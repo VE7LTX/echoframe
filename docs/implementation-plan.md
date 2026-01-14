@@ -296,6 +296,7 @@ echoframe devices
 echoframe devices --loopback
 echoframe record --mode system --system-device "Speakers"
 echoframe record --mode dual --mic-device "Zoom H2" --system-device "Speakers"
+echoframe show path/to/session.session.json
 ```
 
 ## GUI approach (current)

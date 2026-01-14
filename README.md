@@ -81,6 +81,17 @@ Notes\Interview\
 - [Security](SECURITY.md)
 - [License](LICENSE)
 
+## CLI quick reference
+```
+echoframe devices
+echoframe devices --loopback
+echoframe record --mode mic --mic-device "Zoom H2"
+echoframe record --mode system --system-device "Speakers"
+echoframe record --mode dual --mic-device "Zoom H2" --system-device "Speakers"
+echoframe transcribe path/to/audio.wav --model small --out segments.json
+echoframe show path/to/session.session.json
+```
+
 ## Obsidian links
 - [[docs/frontmatter-schema]]
 - [[docs/implementation-plan]]
