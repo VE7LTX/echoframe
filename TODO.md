@@ -40,7 +40,8 @@ schema: 1
 ## Config and storage
 - [x] Config loader
 - [ ] Config-driven CLI defaults
-- [ ] Session metadata persistence (session.json, segments.json)
+- [x] Session metadata persistence (session.json, segments.json)
+- [x] CLI session/segment viewer
 
 ## Personal.ai (text-only)
 - [ ] Upload transcript

@@ -17,6 +17,7 @@ from .recorder import (
 from .transcriber import transcribe_audio
 from .storage import build_session_basename, get_output_dirs
 from .config import load_config
+from .session_io import load_session, load_segments
 
 
 def main() -> int:
@@ -73,6 +74,8 @@ def main() -> int:
     sub.add_parser("note")
     sub.add_parser("process")
     sub.add_parser("config")
+    show_cmd = sub.add_parser("show")
+    show_cmd.add_argument("path", help="Path to .session.json or .segments.json")
     sub.add_parser("gui")
 
     args = parser.parse_args()
@@ -150,6 +153,21 @@ def main() -> int:
             with open(args.out, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2)
         print(f"Segments: {len(segments)}")
+        return 0
+
+    if args.command == "show":
+        if args.path.endswith(".session.json"):
+            session = load_session(args.path)
+            print(f"Session: {session.title}")
+            print(f"Started: {session.started_at}")
+            print(f"Audio: {session.audio_path}")
+            print(f"Note: {session.note_path}")
+            print(f"Segments: {len(session.segments)}")
+        elif args.path.endswith(".segments.json"):
+            segments = load_segments(args.path)
+            print(f"Segments: {len(segments)}")
+        else:
+            print("Unsupported file. Use .session.json or .segments.json")
         return 0
 
     if args.command == "gui":

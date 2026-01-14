@@ -18,3 +18,17 @@ def save_segments(path: str, segments: List[Segment]) -> None:
 def save_session(path: str, session: Session) -> None:
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(asdict(session), handle, indent=2)
+
+
+def load_segments(path: str) -> List[Segment]:
+    with open(path, "r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    return [Segment(**item) for item in raw]
+
+
+def load_session(path: str) -> Session:
+    with open(path, "r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    segments = [Segment(**item) for item in raw.get("segments", [])]
+    raw["segments"] = segments
+    return Session(**raw)
