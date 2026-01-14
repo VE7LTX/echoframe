@@ -74,6 +74,8 @@ Notes\Interview\
 ```
 
 ## Docs
+- [Docs index](docs/index.md)
+- [Getting started](docs/getting-started.md)
 - [Implementation plan](docs/implementation-plan.md)
 - [Frontmatter schema](docs/frontmatter-schema.md)
 - [TODO](TODO.md)
