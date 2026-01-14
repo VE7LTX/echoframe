@@ -2454,15 +2454,13 @@ def launch_gui() -> None:
     settings_menu.add_command(label="Manage lists...", command=_open_manage_lists)
     settings_menu.add_command(label="Clear metadata", command=_clear_fields)
 
-    view_menu.add_command(label="Open Levels HUD", command=_open_hud)
-    view_menu.add_command(label="Reset Peaks", command=_reset_peaks)
 
     main = ttk.Frame(root, padding=8)
     main.grid(row=0, column=0, sticky="nsew")
 
     ttk.Label(
         main,
-        text="Step 1: setup → Step 2: people/context → Step 3: record.",
+        text="Step 1: setup -> Step 2: people/context -> Step 3: record.",
     ).grid(row=0, column=0, sticky="w", pady=(0, 2))
     ttk.Label(
         main,
@@ -2751,15 +2749,11 @@ def launch_gui() -> None:
     ttk.Button(control_row, text="Clear", command=_clear_fields).grid(
         row=0, column=3, padx=2
     )
-    ttk.Button(control_row, text="Reset Peaks", command=_reset_peaks).grid(
-        row=0, column=4, padx=2
-    )
     buttons = control_row.winfo_children()
     _ToolTip(buttons[0], "Start recording with current metadata.")
     _ToolTip(buttons[1], "Stop recording and begin transcription.")
     _ToolTip(buttons[2], "Close the current contact and prepare for the next.")
     _ToolTip(buttons[3], "Clear metadata fields (keeps defaults).")
-    _ToolTip(buttons[4], "Reset peak hold indicators.")
 
     def _add_timestamped_note(_event=None) -> None:
         if not contact_var.get().strip():
@@ -2787,21 +2781,10 @@ def launch_gui() -> None:
     add_note_btn.configure(command=_add_timestamped_note)
     notes_entry.bind("<Return>", _add_timestamped_note)
 
-    meter_frame = ttk.LabelFrame(main, text="Live audio meters", style="Neo.TLabelframe")
-    meter_frame.grid(row=5, column=0, sticky="ew", pady=(6, 0))
-    meter_canvas = tk.Canvas(
-        meter_frame,
-        width=520,
-        height=120,
-        bg="#0f1a2a",
-        highlightthickness=0,
-        bd=0,
-    )
-    meter_canvas.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
-    _ToolTip(meter_canvas, "Per-channel level meters and peak holds.")
+    meter_canvas = None
 
     waveform_frame = ttk.LabelFrame(main, text="Live waveform", style="Neo.TLabelframe")
-    waveform_frame.grid(row=6, column=0, sticky="ew", pady=(6, 0))
+    waveform_frame.grid(row=5, column=0, sticky="ew", pady=(6, 0))
     waveform_canvas = tk.Canvas(
         waveform_frame,
         width=520,
@@ -2814,7 +2797,7 @@ def launch_gui() -> None:
     _ToolTip(waveform_canvas, "Live waveform with transcription progress overlay.")
 
     feed_frame = ttk.LabelFrame(main, text="System feed", style="Neo.TLabelframe")
-    feed_frame.grid(row=7, column=0, sticky="ew", pady=(6, 0))
+    feed_frame.grid(row=6, column=0, sticky="ew", pady=(6, 0))
     feed_box = tk.Text(
         feed_frame,
         width=60,
@@ -2832,7 +2815,7 @@ def launch_gui() -> None:
     _ToolTip(feed_box, "Process updates, device changes, and recording status.")
 
     progress_frame = ttk.Frame(main)
-    progress_frame.grid(row=8, column=0, sticky="ew", pady=(6, 0))
+    progress_frame.grid(row=7, column=0, sticky="ew", pady=(6, 0))
     progress_label_var = tk.StringVar(value="Final transcription idle")
     ttk.Label(progress_frame, textvariable=progress_label_var).grid(
         row=0, column=0, sticky="w"
@@ -2850,7 +2833,7 @@ def launch_gui() -> None:
     _ToolTip(progress_frame, "Progress for final transcription and diarization.")
 
     status_row = ttk.Frame(main)
-    status_row.grid(row=9, column=0, sticky="ew", pady=(6, 0))
+    status_row.grid(row=8, column=0, sticky="ew", pady=(6, 0))
     timer_var = tk.StringVar(value="00:00")
     ttk.Label(status_row, textvariable=timer_var).grid(row=0, column=0, sticky="w")
     status_var = tk.StringVar(value="Idle")
@@ -2917,7 +2900,6 @@ def launch_gui() -> None:
 
     _bind_preset_updates()
     _update_timer()
-    _update_meter()
     _update_waveform()
     _poll_feed()
     _poll_transcribe_progress()

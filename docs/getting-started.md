@@ -56,7 +56,7 @@ python -m echoframe.cli gui
 3) Settings > Audio settings: pick the mic device (Zoom H2/H4).
 4) Settings > Transcription settings: set final and live models.
 5) Settings > Mic setup wizard: run the level check and adjust mic gain.
-6) Live meters and waveform start automatically.
+6) Live waveform starts automatically.
 7) Timestamped notes require a Contact value.
 
 ## Capture modes
@@ -85,4 +85,4 @@ WAV recordings are automatically cleaned after 48 hours to limit disk usage.
 - If devices are not listed, verify Windows sound settings and permissions.
 - If diarization fails, confirm your HuggingFace token.
 - If system audio is silent, ensure the app output device matches the GUI System device.
-- Use `python scripts/diagnose_audio.py` to confirm device meters and `python scripts/diagnose_loopback.py` for system audio.
+- Use `python scripts/diagnose_audio.py` to confirm device capture and `python scripts/diagnose_loopback.py` for system audio.
