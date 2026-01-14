@@ -9,6 +9,7 @@ def test_render_note_includes_frontmatter():
         date="2026-01-13",
         audio_filename="test.wav",
         segments=segments,
+        timestamped_notes=[{"timestamp": "00:02", "text": "Note here"}],
         participants=["Matt"],
         tags=["research"],
         duration_seconds=10,
@@ -23,3 +24,4 @@ def test_render_note_includes_frontmatter():
     assert "tags:" in note
     assert "channels: 4" in note
     assert "## Transcript" in note
+    assert "NOTE:" in note

@@ -29,7 +29,7 @@ from .session_io import save_segments, save_session
 
 def launch_gui() -> None:
     import tkinter as tk
-    from tkinter import ttk
+    from tkinter import messagebox, ttk
 
     root = tk.Tk()
     root.title("EchoFrame")
@@ -198,6 +198,9 @@ def launch_gui() -> None:
         "stop_event": threading.Event(),
         "thread": None,
         "timestamped_notes": [],
+        "active_contact": "",
+        "pending_contact": "",
+        "suppress_contact_prompt": False,
     }
     monitor = {
         "streams": [],
@@ -346,6 +349,14 @@ def launch_gui() -> None:
             stamp = note.get("timestamp", "00:00")
             text = note.get("text", "")
             notes_list.insert("end", f"[{stamp}] {text}")
+
+    def _update_note_controls() -> None:
+        has_contact = bool(contact_var.get().strip())
+        state_label = "normal" if has_contact else "disabled"
+        if notes_entry is not None:
+            notes_entry.configure(state=state_label)
+        if add_note_btn is not None:
+            add_note_btn.configure(state=state_label)
 
     def _remember_preset(key: str, value: str) -> None:
         value = value.strip()
@@ -1082,6 +1093,8 @@ def launch_gui() -> None:
         if state["recording"]:
             return
         logger.info("Start recording requested (%s)", context_type)
+        state["active_contact"] = contact_var.get().strip()
+        state["pending_contact"] = ""
         state["recording"] = True
         state["start_time"] = time.time()
         state["stop_event"].clear()
@@ -1318,6 +1331,10 @@ def launch_gui() -> None:
                     state["recording"] = False
                 state["start_time"] = None
                 _stop_live_transcriber()
+                if state["pending_contact"]:
+                    state["active_contact"] = state["pending_contact"]
+                    state["pending_contact"] = ""
+                _update_note_controls()
 
         state["thread"] = threading.Thread(target=_worker, daemon=True)
         state["thread"].start()
@@ -1370,6 +1387,43 @@ def launch_gui() -> None:
                 tags_var.set(", ".join(tags))
         _log_fields("apply_context_type")
 
+    def _handle_contact_change() -> None:
+        if state["suppress_contact_prompt"]:
+            return
+        new_contact = contact_var.get().strip()
+        if not state["active_contact"]:
+            state["active_contact"] = new_contact
+            _update_note_controls()
+            return
+        if new_contact == state["active_contact"]:
+            _update_note_controls()
+            return
+        if state["recording"]:
+            proceed = messagebox.askyesno(
+                "Split session",
+                "Contact changed during recording. Stop now and start a new file for the new contact?",
+            )
+            if proceed:
+                state["pending_contact"] = new_contact
+                _stop_recording()
+                _set_status("Recording stopped for contact split. Press Start to continue.")
+            else:
+                state["suppress_contact_prompt"] = True
+                contact_var.set(state["active_contact"])
+                state["suppress_contact_prompt"] = False
+            _update_note_controls()
+            return
+        if state["timestamped_notes"]:
+            proceed = messagebox.askyesno(
+                "Clear contact notes",
+                "Contact changed. Clear timestamped notes from the previous contact?",
+            )
+            if proceed:
+                state["timestamped_notes"] = []
+                _refresh_timestamped_notes()
+        state["active_contact"] = new_contact
+        _update_note_controls()
+
     def _save_profile() -> None:
         name = profile_name_var.get().strip()
         if not name:
@@ -1406,8 +1460,10 @@ def launch_gui() -> None:
         context_type_var.set(
             config.context.get("default_context_type", presets["context_types"][0])
         )
+        state["active_contact"] = ""
         state["timestamped_notes"] = []
         _refresh_timestamped_notes()
+        _update_note_controls()
         channel_var.set(
             config.context.get("default_channel", presets["channels"][0])
         )
@@ -2137,6 +2193,8 @@ def launch_gui() -> None:
     profile_name_var = tk.StringVar()
     notes_box = None
     notes_list = None
+    notes_entry = None
+    add_note_btn = None
 
     capture_mode_var = tk.StringVar(
         value=_last_used_value("capture_mode", "mic")
@@ -2260,7 +2318,8 @@ def launch_gui() -> None:
     ttk.Label(meta, text="Contact").grid(row=2, column=0, sticky="w")
     contact_entry = ttk.Entry(meta, textvariable=contact_var, width=24)
     contact_entry.grid(row=2, column=1, sticky="ew")
-    _ToolTip(contact_entry, "Primary contact for the session.")
+    _ToolTip(contact_entry, "Primary contact for the session (notes require this).")
+    contact_var.trace_add("write", lambda *_: _handle_contact_change())
     ttk.Label(meta, text="ID").grid(row=2, column=2, sticky="w")
     contact_id_entry = ttk.Entry(meta, textvariable=contact_id_var, width=24)
     contact_id_entry.grid(row=2, column=3, sticky="ew")
@@ -2334,18 +2393,22 @@ def launch_gui() -> None:
     notes_box.insert("1.0", _last_used_value("notes", ""))
     _ToolTip(notes_box, "Freeform notes to capture context during recording.")
 
-    notes_frame = ttk.LabelFrame(main, text="Timestamped notes", style="Neo.TLabelframe")
-    notes_frame.grid(row=5, column=0, sticky="ew", pady=(6, 0))
+    notes_frame = ttk.LabelFrame(meta, text="Timestamped notes", style="Neo.TLabelframe")
+    notes_frame.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+    notes_frame.columnconfigure(0, weight=1)
     notes_entry_var = tk.StringVar()
-    notes_entry = ttk.Entry(notes_frame, textvariable=notes_entry_var, width=48)
-    notes_entry.grid(row=0, column=0, sticky="w", padx=(6, 4), pady=6)
+    notes_entry = ttk.Entry(notes_frame, textvariable=notes_entry_var, width=52)
+    notes_entry.grid(row=0, column=0, sticky="ew", padx=(6, 4), pady=6)
     add_note_btn = ttk.Button(notes_frame, text="Add note")
     add_note_btn.grid(row=0, column=1, sticky="w", padx=(0, 6), pady=6)
     notes_list = tk.Listbox(
         notes_frame, height=3, bg="#0b0f14", fg="#d8e1ff", highlightthickness=0, bd=0
     )
     notes_list.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
-    _ToolTip(notes_entry, "Add a timestamped note tied to the current recording time.")
+    _ToolTip(
+        notes_entry,
+        "Add a timestamped note tied to the current recording time (requires Contact).",
+    )
     _ToolTip(add_note_btn, "Capture a timestamped note.")
     _ToolTip(notes_list, "Notes captured during recording (stored in the note).")
 
@@ -2379,6 +2442,9 @@ def launch_gui() -> None:
     _ToolTip(buttons[3], "Reset peak hold indicators.")
 
     def _add_timestamped_note(_event=None) -> None:
+        if not contact_var.get().strip():
+            _set_status("Contact required to add timestamped notes")
+            return
         text = notes_entry_var.get().strip()
         if not text:
             return
@@ -2386,7 +2452,14 @@ def launch_gui() -> None:
         if state["recording"] and state["start_time"]:
             elapsed = time.time() - state["start_time"]
         stamp = _format_timestamp(elapsed)
-        state["timestamped_notes"].append({"timestamp": stamp, "text": text})
+        state["timestamped_notes"].append(
+            {
+                "timestamp": stamp,
+                "text": text,
+                "contact": contact_var.get().strip(),
+                "contact_id": contact_id_var.get().strip() or None,
+            }
+        )
         notes_entry_var.set("")
         _refresh_timestamped_notes()
         _set_status(f"Timestamped note added at {stamp}")
@@ -2395,7 +2468,7 @@ def launch_gui() -> None:
     notes_entry.bind("<Return>", _add_timestamped_note)
 
     meter_frame = ttk.LabelFrame(main, text="Live audio meters", style="Neo.TLabelframe")
-    meter_frame.grid(row=6, column=0, sticky="ew", pady=(6, 0))
+    meter_frame.grid(row=5, column=0, sticky="ew", pady=(6, 0))
     meter_canvas = tk.Canvas(
         meter_frame,
         width=520,
@@ -2408,7 +2481,7 @@ def launch_gui() -> None:
     _ToolTip(meter_canvas, "Per-channel level meters and peak holds.")
 
     waveform_frame = ttk.LabelFrame(main, text="Live waveform", style="Neo.TLabelframe")
-    waveform_frame.grid(row=7, column=0, sticky="ew", pady=(6, 0))
+    waveform_frame.grid(row=6, column=0, sticky="ew", pady=(6, 0))
     waveform_canvas = tk.Canvas(
         waveform_frame,
         width=520,
@@ -2421,7 +2494,7 @@ def launch_gui() -> None:
     _ToolTip(waveform_canvas, "Live waveform with transcription progress overlay.")
 
     feed_frame = ttk.LabelFrame(main, text="System feed", style="Neo.TLabelframe")
-    feed_frame.grid(row=8, column=0, sticky="ew", pady=(6, 0))
+    feed_frame.grid(row=7, column=0, sticky="ew", pady=(6, 0))
     feed_box = tk.Text(
         feed_frame,
         width=60,
@@ -2439,7 +2512,7 @@ def launch_gui() -> None:
     _ToolTip(feed_box, "Process updates, device changes, and recording status.")
 
     progress_frame = ttk.Frame(main)
-    progress_frame.grid(row=9, column=0, sticky="ew", pady=(6, 0))
+    progress_frame.grid(row=8, column=0, sticky="ew", pady=(6, 0))
     progress_label_var = tk.StringVar(value="Final transcription idle")
     ttk.Label(progress_frame, textvariable=progress_label_var).grid(
         row=0, column=0, sticky="w"
@@ -2457,7 +2530,7 @@ def launch_gui() -> None:
     _ToolTip(progress_frame, "Progress for final transcription and diarization.")
 
     status_row = ttk.Frame(main)
-    status_row.grid(row=10, column=0, sticky="ew", pady=(6, 0))
+    status_row.grid(row=9, column=0, sticky="ew", pady=(6, 0))
     timer_var = tk.StringVar(value="00:00")
     ttk.Label(status_row, textvariable=timer_var).grid(row=0, column=0, sticky="w")
     level_var = tk.StringVar(value="0.00")
@@ -2535,5 +2608,6 @@ def launch_gui() -> None:
     _poll_feed()
     _poll_transcribe_progress()
     root.after(250, lambda: _ensure_monitoring("launch"))
+    _update_note_controls()
     root.protocol("WM_DELETE_WINDOW", _on_close)
     root.mainloop()

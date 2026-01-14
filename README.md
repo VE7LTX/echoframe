@@ -13,6 +13,7 @@ Prototype working: GUI bar, local recording, Faster-Whisper transcription, optio
 - Faster-Whisper transcription with timestamps
 - Live waveform preview with transcription/diarization progress overlay
 - System feed panel for process updates
+- Timestamped notes tied to contacts (basic CRM flow)
 - Live vs final model split with progress indicator
 - Optional speaker diarization with pyannote
 - Obsidian YAML frontmatter + Markdown transcript
@@ -41,6 +42,10 @@ python -m echoframe.cli gui
 
 Note: some Zoom H2/H4 modes expose only 2 channels to Windows. EchoFrame will
 clamp channel counts to what the device reports.
+
+## Contact splits
+Timestamped notes require a Contact. If the contact changes mid-session, EchoFrame
+prompts to stop and split into a new file.
 
 System audio isolation (no virtual cable):
 1) Windows Settings > System > Sound > App volume and device preferences.

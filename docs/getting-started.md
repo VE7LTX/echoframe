@@ -56,6 +56,7 @@ python -m echoframe.cli gui
 3) Settings > Audio settings: pick the mic device (Zoom H2/H4).
 4) Settings > Transcription settings: set final and live models.
 5) Live meters and waveform start automatically (status bar shows monitoring).
+6) Timestamped notes require a Contact value.
 
 ## Capture modes
 - mic: Zoom H2/H4 or any mic

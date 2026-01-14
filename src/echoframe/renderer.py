@@ -99,19 +99,33 @@ def render_note(
         lines.append("")
         lines.append(context_notes)
         lines.append("")
-    if timestamped_notes:
-        lines.append("## Notes Timeline")
-        lines.append("")
-        for note in timestamped_notes:
-            stamp = note.get("timestamp", "00:00")
-            text = note.get("text", "")
-            lines.append(f"- [{stamp}] {text}")
-        lines.append("")
     lines.append("## Transcript")
     lines.append("")
+
+    timeline = []
     for seg in segments:
-        speaker = f" {seg.speaker}:" if seg.speaker else ""
-        lines.append(f"[{seg.start:0>8.2f}]{speaker} {seg.text}")
+        timeline.append(
+            {
+                "time": seg.start,
+                "line": f"[{seg.start:0>8.2f}]"
+                f"{' ' + seg.speaker + ':' if seg.speaker else ''} {seg.text}",
+            }
+        )
+    if timestamped_notes:
+        for note in timestamped_notes:
+            stamp = note.get("timestamp", "00:00")
+            try:
+                mins, secs = stamp.split(":", 1)
+                seconds = float(mins) * 60 + float(secs)
+            except ValueError:
+                seconds = 0.0
+            label = "NOTE"
+            if note.get("contact"):
+                label = f"NOTE ({note.get('contact')})"
+            line = f"[{seconds:0>8.2f}] {label}: {note.get('text', '')}"
+            timeline.append({"time": seconds, "line": line})
+    for item in sorted(timeline, key=lambda x: x["time"]):
+        lines.append(item["line"])
     lines.append("")
     if debug_log:
         lines.append("## Debug Log")
