@@ -8,7 +8,12 @@ import os
 
 import json
 
-from .recorder import list_input_devices, record_audio, record_audio_stream
+from .recorder import (
+    list_input_devices,
+    record_audio,
+    record_audio_stream,
+    record_audio_stream_dual,
+)
 from .transcriber import transcribe_audio
 from .storage import build_session_basename, ensure_dir
 
@@ -33,11 +38,22 @@ def main() -> int:
     )
     record_cmd.add_argument("--device", help="Preferred device name substring.")
     record_cmd.add_argument("--rate", type=int, default=44100, help="Sample rate.")
-    record_cmd.add_argument("--channels", type=int, default=1, help="Channels.")
+    record_cmd.add_argument("--channels", type=int, default=1, help="Mic channels.")
     record_cmd.add_argument(
         "--loopback",
         action="store_true",
         help="Capture system audio via WASAPI loopback.",
+    )
+    record_cmd.add_argument(
+        "--mode",
+        choices=["mic", "system", "dual"],
+        default="mic",
+        help="Capture mode.",
+    )
+    record_cmd.add_argument("--mic-device", help="Mic device substring.")
+    record_cmd.add_argument("--system-device", help="System device substring.")
+    record_cmd.add_argument(
+        "--system-channels", type=int, default=2, help="System channels."
     )
 
     transcribe_cmd = sub.add_parser("transcribe")
@@ -73,22 +89,35 @@ def main() -> int:
         ensure_dir(args.out_dir)
         basename = build_session_basename(args.title, datetime.now())
         output_path = os.path.join(args.out_dir, f"{basename}.wav")
-        if args.duration:
+        mode = args.mode
+        mic_device = args.mic_device or args.device
+        system_device = args.system_device or args.device
+        if mode == "dual":
+            record_audio_stream_dual(
+                output_path=output_path,
+                sample_rate_hz=args.rate,
+                mic_channels=args.channels,
+                system_channels=args.system_channels,
+                mic_device_name=mic_device,
+                system_device_name=system_device,
+                duration_seconds=args.duration,
+            )
+        elif args.duration:
             record_audio(
                 output_path=output_path,
                 duration_seconds=args.duration,
                 sample_rate_hz=args.rate,
                 channels=args.channels,
-                device_name=args.device,
-                loopback=args.loopback,
+                device_name=system_device if mode == "system" else mic_device,
+                loopback=mode == "system" or args.loopback,
             )
         else:
             record_audio_stream(
                 output_path=output_path,
                 sample_rate_hz=args.rate,
                 channels=args.channels,
-                device_name=args.device,
-                loopback=args.loopback,
+                device_name=system_device if mode == "system" else mic_device,
+                loopback=mode == "system" or args.loopback,
             )
         print(f"Wrote {output_path}")
         return 0

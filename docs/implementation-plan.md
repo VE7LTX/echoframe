@@ -124,6 +124,7 @@ System audio capture (Windows):
 - Use WASAPI loopback via `sounddevice.WasapiSettings(loopback=True)`.
 - This allows capturing webcall/video chat audio from output devices.
 - Expose a loopback toggle and output-device selection in the GUI/CLI.
+- Support dual-track capture (mic + system) in a single multichannel WAV.
 
 Processing logic (recording):
 ```

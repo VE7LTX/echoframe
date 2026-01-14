@@ -152,3 +152,86 @@ def record_audio_stream(
 
     duration_seconds = int(frames_written / sample_rate_hz)
     return RecordingResult(audio_path=output_path, duration_seconds=duration_seconds)
+
+
+def record_audio_stream_dual(
+    output_path: str,
+    sample_rate_hz: int = 44100,
+    mic_channels: int = 1,
+    system_channels: int = 2,
+    mic_device_name: Optional[str] = None,
+    system_device_name: Optional[str] = None,
+    stop_event=None,
+    duration_seconds: Optional[int] = None,
+) -> RecordingResult:
+    try:
+        import sounddevice as sd
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        raise RuntimeError("sounddevice is required for recording.") from exc
+
+    try:
+        import numpy as np
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        raise RuntimeError("numpy is required for recording.") from exc
+
+    mic_device = find_input_device(mic_device_name, loopback=False)
+    system_device = find_input_device(system_device_name, loopback=True)
+    mic_index = mic_device.get("index")
+    system_index = system_device.get("index")
+
+    import wave
+
+    frames_written = 0
+    target_frames = None
+    if duration_seconds:
+        target_frames = int(duration_seconds * sample_rate_hz)
+
+    blocksize = 1024
+    extra_settings = None
+    if hasattr(sd, "WasapiSettings"):
+        extra_settings = sd.WasapiSettings(loopback=True)
+
+    with wave.open(output_path, "wb") as handle:
+        handle.setnchannels(mic_channels + system_channels)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate_hz)
+
+        with sd.InputStream(
+            samplerate=sample_rate_hz,
+            channels=mic_channels,
+            dtype="int16",
+            device=mic_index,
+            blocksize=blocksize,
+        ) as mic_stream, sd.InputStream(
+            samplerate=sample_rate_hz,
+            channels=system_channels,
+            dtype="int16",
+            device=system_index,
+            blocksize=blocksize,
+            extra_settings=extra_settings,
+        ) as sys_stream:
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                mic_data, _ = mic_stream.read(blocksize)
+                sys_data, _ = sys_stream.read(blocksize)
+
+                if mic_data.shape[0] != sys_data.shape[0]:
+                    frames = min(mic_data.shape[0], sys_data.shape[0])
+                    mic_data = mic_data[:frames]
+                    sys_data = sys_data[:frames]
+
+                if mic_data.dtype != np.int16:
+                    mic_data = mic_data.astype(np.int16)
+                if sys_data.dtype != np.int16:
+                    sys_data = sys_data.astype(np.int16)
+
+                combined = np.concatenate([mic_data, sys_data], axis=1)
+                handle.writeframes(combined.tobytes())
+                frames_written += combined.shape[0]
+
+                if target_frames and frames_written >= target_frames:
+                    break
+
+    actual_duration = int(frames_written / sample_rate_hz)
+    return RecordingResult(audio_path=output_path, duration_seconds=actual_duration)
